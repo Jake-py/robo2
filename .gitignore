@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+.robo2/
+*.egg-info/
+.env
