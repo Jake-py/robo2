@@ -3,3 +3,4 @@ pyserial>=3.5
 paramiko>=3.4.0
 requests>=2.31.0
 opencv-python>=4.8.0
+ultralytics>=8.3.0

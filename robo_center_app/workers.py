@@ -111,8 +111,14 @@ class YoloStream(QThread):
         self._src = 0
         self._mode = "detect"
         self._conf = 0.25
+        self._backend = "remote"
+        self._local_engine = None
         self._running = False
         self._request_error_emitted = False
+
+    def set_backend(self, backend, local_engine=None):
+        self._backend = backend
+        self._local_engine = local_engine
 
     def start_stream(self, server, src, mode, conf=0.25):
         if self.isRunning():
@@ -152,50 +158,48 @@ class YoloStream(QThread):
                 self.err.emit("Video source stopped delivering frames")
                 break
 
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             detections = []
             t0 = time.time()
-            try:
-                response = requests.post(
-                    f"{self._server}/{self._mode}",
-                    files={"file": ("f.jpg", buf.tobytes(), "image/jpeg")},
-                    params={"conf": self._conf},
-                    timeout=2,
-                )
-                response.raise_for_status()
-                data = response.json()
-                detections = (
-                    data.get("detections")
-                    or data.get("tracked")
-                    or data.get("segments")
-                    or []
-                )
-                latency = (time.time() - t0) * 1000
-                self._request_error_emitted = False
-
-                for detection in detections:
-                    box = detection.get("box", [0, 0, 0, 0])
-                    x1, y1, x2, y2 = map(int, box)
-                    name = detection.get("class_name", "?")
-                    conf = detection.get("confidence", 0.0)
-                    tid = detection.get("track_id")
-                    label = f"{name} {conf:.2f}" + (f" #{tid}" if tid is not None else "")
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 229, 255), 2)
-                    cv2.rectangle(frame, (x1, y1 - 18), (x1 + len(label) * 7, y1), (0, 229, 255), -1)
-                    cv2.putText(
-                        frame,
-                        label,
-                        (x1 + 2, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.45,
-                        (4, 6, 10),
-                        1,
+            if self._backend == "local":
+                if not self._local_engine or not self._local_engine.is_ready:
+                    self.err.emit("Local AI not loaded")
+                    break
+                try:
+                    detections = self._local_engine.infer_frame(frame, self._mode, self._conf)
+                    latency = (time.time() - t0) * 1000
+                    self._request_error_emitted = False
+                except Exception as exc:
+                    latency = 0.0
+                    if not self._request_error_emitted:
+                        self.err.emit(f"Local AI error: {exc}")
+                        self._request_error_emitted = True
+            else:
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                try:
+                    response = requests.post(
+                        f"{self._server}/{self._mode}",
+                        files={"file": ("f.jpg", buf.tobytes(), "image/jpeg")},
+                        params={"conf": self._conf},
+                        timeout=2,
                     )
-            except Exception as exc:
-                latency = 0.0
-                if not self._request_error_emitted:
-                    self.err.emit(f"Vision request error: {exc}")
-                    self._request_error_emitted = True
+                    response.raise_for_status()
+                    data = response.json()
+                    detections = (
+                        data.get("detections")
+                        or data.get("tracked")
+                        or data.get("segments")
+                        or []
+                    )
+                    latency = (time.time() - t0) * 1000
+                    self._request_error_emitted = False
+                except Exception as exc:
+                    latency = 0.0
+                    if not self._request_error_emitted:
+                        self.err.emit(f"Vision request error: {exc}")
+                        self._request_error_emitted = True
+
+            if detections:
+                self._draw_detections(frame, detections)
 
             rgb = frame[:, :, ::-1].copy()
             height, width = rgb.shape[:2]
@@ -211,6 +215,110 @@ class YoloStream(QThread):
 
         self._running = False
         cap.release()
+
+    def _draw_detections(self, frame, detections):
+        import cv2
+
+        for detection in detections:
+            box = detection.get("box", [0, 0, 0, 0])
+            x1, y1, x2, y2 = map(int, box)
+            name = detection.get("class_name", "?")
+            conf = detection.get("confidence", 0.0)
+            tid = detection.get("track_id")
+            label = f"{name} {conf:.2f}" + (f" #{tid}" if tid is not None else "")
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 229, 255), 2)
+            cv2.rectangle(frame, (x1, y1 - 18), (x1 + len(label) * 7, y1), (0, 229, 255), -1)
+            cv2.putText(
+                frame,
+                label,
+                (x1 + 2, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (4, 6, 10),
+                1,
+            )
+
+
+class LocalYoloEngine:
+    def __init__(self):
+        self.model = None
+        self.model_name = ""
+        self.device = "cpu"
+
+    @property
+    def is_ready(self):
+        return self.model is not None
+
+    def load(self, model_name="yolo11s.pt", device="cpu"):
+        try:
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise RuntimeError("ultralytics is not installed. pip install ultralytics") from exc
+        self.model = YOLO(model_name)
+        self.model_name = model_name
+        self.device = device
+
+    def unload(self):
+        self.model = None
+        self.model_name = ""
+        self.device = "cpu"
+
+    def infer_frame(self, frame, mode="detect", conf=0.25):
+        if not self.model:
+            raise RuntimeError("Local AI model is not loaded")
+
+        if mode == "track":
+            results = self.model.track(
+                frame,
+                conf=conf,
+                persist=True,
+                verbose=False,
+                device=self.device,
+            )
+        elif mode == "segment":
+            results = self.model.predict(
+                frame,
+                conf=conf,
+                task="segment",
+                verbose=False,
+                device=self.device,
+            )
+        else:
+            results = self.model.predict(
+                frame,
+                conf=conf,
+                verbose=False,
+                device=self.device,
+            )
+
+        detections = []
+        if not results:
+            return detections
+        result = results[0]
+        boxes = getattr(result, "boxes", None)
+        if boxes is None:
+            return detections
+        names = result.names or {}
+        for i in range(len(boxes)):
+            xyxy = boxes.xyxy[i].tolist()
+            conf_val = float(boxes.conf[i]) if boxes.conf is not None else 0.0
+            cls_id = int(boxes.cls[i]) if boxes.cls is not None else -1
+            name = names.get(cls_id, str(cls_id))
+            tid = None
+            if hasattr(boxes, "id") and boxes.id is not None:
+                try:
+                    tid = int(boxes.id[i])
+                except Exception:
+                    tid = None
+            detections.append(
+                {
+                    "box": xyxy,
+                    "class_name": name,
+                    "confidence": conf_val,
+                    "track_id": tid,
+                }
+            )
+        return detections
 
 
 class ArduinoWorker(QThread):

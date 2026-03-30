@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 from .brain import RobotBrain
 from .theme import C, SS
 from .widgets import Led, RadarWidget
-from .workers import ArduinoWorker, SSHWorker, YoloStream
+from .workers import ArduinoWorker, LocalYoloEngine, SSHWorker, YoloStream
 
 
 class RoboNeural(QMainWindow):
@@ -46,6 +46,7 @@ class RoboNeural(QMainWindow):
         self.ssh = SSHWorker()
         self.yolo = YoloStream()
         self.ard = ArduinoWorker()
+        self.local_ai = LocalYoloEngine()
 
         self.ssh.out.connect(self._ssh_out)
         self.ssh.status.connect(self._ssh_status)
@@ -65,8 +66,11 @@ class RoboNeural(QMainWindow):
         self._connected_server_ip = ""
         self._connected_server_host = ""
         self._selected_photo = ""
+        self._photo_result_path = ""
+        self._ai_backend = "remote"
 
         self._build_ui()
+        self._ai_backend_changed(self.ai_backend_cb.currentText())
         self._refresh_ports()
         self._update_photo_target()
 
@@ -301,6 +305,47 @@ class RoboNeural(QMainWindow):
         vis_layout.addLayout(buttons_row)
         layout.addWidget(vis_box)
 
+        ai_box = QGroupBox("AI ENGINE")
+        ai_layout = QVBoxLayout(ai_box)
+        ai_layout.setSpacing(5)
+
+        row = QHBoxLayout()
+        row.addWidget(self._label("BACKEND", 9, fixed=52))
+        self.ai_backend_cb = QComboBox()
+        self.ai_backend_cb.addItems(["SERVER HTTP", "LOCAL YOLOv11s"])
+        self.ai_backend_cb.currentTextChanged.connect(self._ai_backend_changed)
+        row.addWidget(self.ai_backend_cb)
+        ai_layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(self._label("MODEL", 9, fixed=52))
+        self.ai_model_in = QLineEdit("yolo11s.pt")
+        row.addWidget(self.ai_model_in)
+        ai_layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(self._label("DEVICE", 9, fixed=52))
+        self.ai_device_cb = QComboBox()
+        self.ai_device_cb.addItems(["cpu", "cuda:0"])
+        row.addWidget(self.ai_device_cb)
+        ai_layout.addLayout(row)
+
+        buttons_row = QHBoxLayout()
+        self.btn_ai_load = self._btn("LOAD AI", C["green_dim"])
+        self.btn_ai_load.clicked.connect(self._ai_load)
+        buttons_row.addWidget(self.btn_ai_load)
+        self.btn_ai_unload = self._btn("UNLOAD")
+        self.btn_ai_unload.clicked.connect(self._ai_unload)
+        buttons_row.addWidget(self.btn_ai_unload)
+        self.ai_led = Led(8)
+        buttons_row.addWidget(self.ai_led)
+        self.ai_lbl = QLabel("REMOTE")
+        self.ai_lbl.setStyleSheet(f"color:{C['text2']};font-size:9px;")
+        buttons_row.addWidget(self.ai_lbl)
+        buttons_row.addStretch()
+        ai_layout.addLayout(buttons_row)
+        layout.addWidget(ai_box)
+
         layout.addStretch()
         return widget
 
@@ -480,6 +525,18 @@ class RoboNeural(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        link_box = QGroupBox("AI LINK")
+        link_layout = QHBoxLayout(link_box)
+        link_layout.addWidget(self._label("SOURCE", 9, fixed=52))
+        self.ai_source_lbl = QLabel("SERVER HTTP")
+        self.ai_source_lbl.setStyleSheet(f"color:{C['cyan']};font-weight:bold;")
+        link_layout.addWidget(self.ai_source_lbl)
+        link_layout.addStretch()
+        self.ai_link_on = QCheckBox("Связать ИИ с роботом")
+        self.ai_link_on.stateChanged.connect(self._ai_link_toggle)
+        link_layout.addWidget(self.ai_link_on)
+        layout.addWidget(link_box)
+
         ai_box = QGroupBox("AI АВТОНОМНЫЙ МОЗГ")
         ai_layout = QHBoxLayout(ai_box)
         self.ai_on = QCheckBox("ИИ управляет роботом")
@@ -575,6 +632,28 @@ class RoboNeural(QMainWindow):
         button.clicked.connect(self._ard_send_manual)
         row.addWidget(button)
         layout.addLayout(row)
+
+        sensor_box = QGroupBox("SENSORS (ARDUINO / ESP32)")
+        sensor_grid = QGridLayout(sensor_box)
+        self._sensor_labels = {}
+        sensors = [
+            ("ROBOT", "ROBOT"),
+            ("IR", "IR"),
+            ("ULTRA", "ULTRA"),
+            ("BUMPER", "BUMPER"),
+            ("IMU", "IMU"),
+            ("TEMP", "TEMP"),
+            ("BATTERY", "BATTERY"),
+            ("ESP_RSSI", "ESP_RSSI"),
+        ]
+        for i, (label, key) in enumerate(sensors):
+            sensor_grid.addWidget(self._label(label, 9, fixed=72), i, 0)
+            value_lbl = QLabel("—")
+            value_lbl.setStyleSheet(f"color:{C['cyan']};font-weight:bold;")
+            value_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            sensor_grid.addWidget(value_lbl, i, 1)
+            self._sensor_labels[key] = value_lbl
+        layout.addWidget(sensor_box)
 
         quick_box = QGroupBox("БЫСТРЫЕ КОМАНДЫ")
         quick_layout = QHBoxLayout(quick_box)
@@ -711,6 +790,60 @@ class RoboNeural(QMainWindow):
         ports = [port.device for port in serial.tools.list_ports.comports()]
         self.ard_port.addItems(ports if ports else ["(нет портов)"])
 
+    def _ai_backend_changed(self, text):
+        is_local = "LOCAL" in text
+        self._ai_backend = "local" if is_local else "remote"
+        self.ai_model_in.setEnabled(is_local)
+        self.ai_device_cb.setEnabled(is_local)
+        self.btn_ai_load.setEnabled(is_local)
+        self.btn_ai_unload.setEnabled(is_local)
+        if is_local:
+            self.ai_source_lbl.setText("LOCAL YOLOv11s")
+            if self.local_ai.is_ready:
+                self.ai_led.set(C["green"])
+                self.ai_lbl.setText("LOCAL READY")
+                self.ai_lbl.setStyleSheet(f"color:{C['green']};font-size:9px;")
+            else:
+                self.ai_led.set(C["amber"], True)
+                self.ai_lbl.setText("LOCAL NOT LOADED")
+                self.ai_lbl.setStyleSheet(f"color:{C['amber']};font-size:9px;")
+        else:
+            self.ai_source_lbl.setText("SERVER HTTP")
+            self.ai_led.set(C["cyan_dim"])
+            self.ai_lbl.setText("REMOTE")
+            self.ai_lbl.setStyleSheet(f"color:{C['text2']};font-size:9px;")
+        self._log(f"AI backend: {self.ai_source_lbl.text()}", C["cyan"])
+
+    def _ai_load(self):
+        model_name = self.ai_model_in.text().strip() or "yolo11s.pt"
+        device = self.ai_device_cb.currentText()
+        try:
+            self.local_ai.load(model_name, device)
+            self.ai_led.set(C["green"])
+            self.ai_lbl.setText("LOCAL READY")
+            self.ai_lbl.setStyleSheet(f"color:{C['green']};font-size:9px;")
+            self._log(f"Local AI loaded: {model_name} ({device})", C["green"])
+        except Exception as exc:
+            self.ai_led.set(C["red"])
+            self.ai_lbl.setText("LOCAL ERROR")
+            self.ai_lbl.setStyleSheet(f"color:{C['red']};font-size:9px;")
+            self._log(f"Local AI load failed: {exc}", C["red"])
+
+    def _ai_unload(self):
+        self.local_ai.unload()
+        self.ai_led.set(C["amber"], True)
+        self.ai_lbl.setText("LOCAL UNLOADED")
+        self.ai_lbl.setStyleSheet(f"color:{C['amber']};font-size:9px;")
+        self._log("Local AI unloaded", C["amber"])
+
+    def _ai_link_toggle(self, state):
+        desired = state > 0
+        if self.ai_on.isChecked() != desired:
+            self.ai_on.blockSignals(True)
+            self.ai_on.setChecked(desired)
+            self.ai_on.blockSignals(False)
+            self._ai_toggle(2 if desired else 0)
+
     def _ping(self):
         ip = self.ip_in.text().strip()
         port = self.port_in.text().strip()
@@ -792,6 +925,10 @@ class RoboNeural(QMainWindow):
         src = self.cam_src.text().strip()
         mode = self.yolo_mode.currentText()
         conf = self.conf_sl.value() / 100
+        if self._ai_backend == "local" and not self.local_ai.is_ready:
+            self._log("Local AI not loaded. Click LOAD AI.", C["red"])
+            return
+        self.yolo.set_backend(self._ai_backend, self.local_ai)
         self.yolo.start_stream(self._server_url(), src, mode, conf)
         if self.yolo.isRunning():
             self.btn_cam_start.setEnabled(False)
@@ -884,6 +1021,7 @@ class RoboNeural(QMainWindow):
 
     def _ard_rx(self, data):
         self.ard_mon.append(f'<span style="color:{C["amber"]}">← {data}</span>')
+        self._parse_sensor_line(data)
 
     def _ard_send(self, cmd):
         if self.wifi_en.isChecked():
@@ -921,6 +1059,9 @@ class RoboNeural(QMainWindow):
         mode = self.ai_mode_cb.currentText() if state > 0 else "IDLE"
         self.brain.set_mode(mode)
         self._stats["ai_mode"].setText(mode)
+        self.ai_link_on.blockSignals(True)
+        self.ai_link_on.setChecked(state > 0)
+        self.ai_link_on.blockSignals(False)
         self._log(f"AI Brain: {'ON -> ' + mode if state > 0 else 'OFF'}", C["amber"])
 
     def _brain_cmd(self, cmd):
@@ -933,6 +1074,35 @@ class RoboNeural(QMainWindow):
             target = f"{target} ({self._connected_server_host})"
         self.photo_target_lbl.setText(target)
 
+    def _parse_sensor_line(self, data):
+        if not hasattr(self, "_sensor_labels"):
+            return
+        raw = data.strip()
+        prefixes = ["SENSOR:", "ESP32:", "ESP:"]
+        for prefix in prefixes:
+            if raw.startswith(prefix):
+                rest = raw[len(prefix) :].strip()
+                parts = rest.split(":")
+                if len(parts) < 2:
+                    return
+                key = parts[0].strip().upper()
+                value = ":".join(parts[1:]).strip()
+                if prefix.startswith("ESP") and key == "RSSI":
+                    key = "ESP_RSSI"
+                self._set_sensor_value(key, value)
+                return
+
+    def _set_sensor_value(self, key, value):
+        label = self._sensor_labels.get(key)
+        if not label:
+            return
+        label.setText(value)
+        if key == "ROBOT":
+            on = value.strip().lower() in {"1", "on", "true", "yes", "detected"}
+            label.setStyleSheet(f"color:{C['green'] if on else C['red']};font-weight:bold;")
+        else:
+            label.setStyleSheet(f"color:{C['cyan']};font-weight:bold;")
+
     def _pick_photo(self):
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
@@ -943,6 +1113,7 @@ class RoboNeural(QMainWindow):
         if not path:
             return
         self._selected_photo = path
+        self._photo_result_path = ""
         self.photo_path.setText(path)
         self._set_preview(self.photo_preview, path, "PHOTO PREVIEW")
         self.photo_status_lbl.setText("PHOTO READY")
@@ -968,7 +1139,8 @@ class RoboNeural(QMainWindow):
         super().resizeEvent(event)
         if self._selected_photo:
             self._set_preview(self.photo_preview, self._selected_photo, "PHOTO PREVIEW")
-            self._set_preview(self.photo_result_preview, self._selected_photo, "RESULT PREVIEW")
+            preview_path = self._photo_result_path or self._selected_photo
+            self._set_preview(self.photo_result_preview, preview_path, "RESULT PREVIEW")
 
     def _require_photo(self):
         if self._selected_photo:
@@ -1003,23 +1175,60 @@ class RoboNeural(QMainWindow):
     def _send_photo_to_ai(self):
         if not self._require_photo():
             return
-        try:
-            mode = self.photo_mode.currentText()
-            with open(self._selected_photo, "rb") as photo_file:
-                response = requests.post(
-                    f"{self._server_url()}/{mode}",
-                    files={"file": (os.path.basename(self._selected_photo), photo_file, "image/jpeg")},
-                    params={"conf": self.conf_sl.value() / 100},
-                    timeout=10,
+        mode = self.photo_mode.currentText()
+        if self._ai_backend == "local":
+            if not self.local_ai.is_ready:
+                self._log("Local AI not loaded. Click LOAD AI.", C["red"])
+                return
+            try:
+                import cv2
+            except ImportError:
+                self._log("pip install opencv-python", C["red"])
+                return
+            try:
+                image = cv2.imread(self._selected_photo)
+                if image is None:
+                    raise RuntimeError("Cannot read image")
+                detections = self.local_ai.infer_frame(image, mode, self.conf_sl.value() / 100)
+                result = {
+                    "backend": "local",
+                    "model": self.local_ai.model_name,
+                    "mode": mode,
+                    "detections": detections,
+                }
+                text = json.dumps(result, ensure_ascii=False, indent=2)
+                self.photo_result.setPlainText(f"LOCAL YOLO {mode.upper()} RESULT\n\n{text}")
+                self._photo_result_path = self._render_local_ai_preview(
+                    image, detections, self._selected_photo
                 )
-            response.raise_for_status()
-            self._show_photo_result(f"YOLO {mode.upper()} RESULT", response)
-            self._set_preview(self.photo_result_preview, self._selected_photo, "RESULT PREVIEW")
-            self._log(f"Photo analyzed via YOLO [{mode}]", C["green"])
-        except Exception as exc:
-            self._log(f"YOLO photo request failed: {exc}", C["red"])
-            self.photo_status_lbl.setText("AI FAILED")
-            self.photo_status_lbl.setStyleSheet(f"color:{C['red']};font-size:10px;")
+                preview_path = self._photo_result_path or self._selected_photo
+                self._set_preview(self.photo_result_preview, preview_path, "RESULT PREVIEW")
+                self.photo_status_lbl.setText("DONE")
+                self.photo_status_lbl.setStyleSheet(f"color:{C['green']};font-size:10px;")
+                self._log(f"Photo analyzed via LOCAL YOLO [{mode}]", C["green"])
+            except Exception as exc:
+                self._log(f"Local YOLO failed: {exc}", C["red"])
+                self._photo_result_path = ""
+                self.photo_status_lbl.setText("AI FAILED")
+                self.photo_status_lbl.setStyleSheet(f"color:{C['red']};font-size:10px;")
+        else:
+            try:
+                with open(self._selected_photo, "rb") as photo_file:
+                    response = requests.post(
+                        f"{self._server_url()}/{mode}",
+                        files={"file": (os.path.basename(self._selected_photo), photo_file, "image/jpeg")},
+                        params={"conf": self.conf_sl.value() / 100},
+                        timeout=10,
+                    )
+                response.raise_for_status()
+                self._show_photo_result(f"YOLO {mode.upper()} RESULT", response)
+                self._photo_result_path = ""
+                self._set_preview(self.photo_result_preview, self._selected_photo, "RESULT PREVIEW")
+                self._log(f"Photo analyzed via YOLO [{mode}]", C["green"])
+            except Exception as exc:
+                self._log(f"YOLO photo request failed: {exc}", C["red"])
+                self.photo_status_lbl.setText("AI FAILED")
+                self.photo_status_lbl.setStyleSheet(f"color:{C['red']};font-size:10px;")
 
     def _send_photo_both(self):
         self._send_photo_to_pc()
@@ -1034,6 +1243,40 @@ class RoboNeural(QMainWindow):
         self.photo_result.setPlainText(f"{title}\n\n{text}")
         self.photo_status_lbl.setText("DONE")
         self.photo_status_lbl.setStyleSheet(f"color:{C['green']};font-size:10px;")
+
+    def _render_local_ai_preview(self, image, detections, src_path):
+        try:
+            import cv2
+        except ImportError:
+            return ""
+
+        try:
+            canvas = image.copy()
+            for detection in detections:
+                box = detection.get("box", [0, 0, 0, 0])
+                x1, y1, x2, y2 = map(int, box)
+                name = detection.get("class_name", "?")
+                conf = detection.get("confidence", 0.0)
+                tid = detection.get("track_id")
+                label = f"{name} {conf:.2f}" + (f" #{tid}" if tid is not None else "")
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 229, 255), 2)
+                cv2.rectangle(canvas, (x1, y1 - 18), (x1 + len(label) * 7, y1), (0, 229, 255), -1)
+                cv2.putText(
+                    canvas,
+                    label,
+                    (x1 + 2, y1 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (4, 6, 10),
+                    1,
+                )
+
+            base = os.path.splitext(os.path.basename(src_path))[0]
+            out_path = os.path.join("/tmp", f"{base}_local_ai.jpg")
+            cv2.imwrite(out_path, canvas)
+            return out_path
+        except Exception:
+            return ""
 
     def closeEvent(self, event):
         self._ping_timer.stop()
