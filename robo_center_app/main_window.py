@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSplitter,
     QTabWidget,
@@ -30,13 +31,241 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .brain import RobotBrain
 from .theme import C, SS
 from .widgets import Led, RadarWidget
-from .workers import ArduinoWorker, LocalYoloEngine, SSHWorker, YoloStream
+from .workers import (
+    ArduinoWorker,
+    LocalYoloEngine,
+    LocalOcrEngine,
+    SSHWorker,
+    YoloModelManager,
+    YoloStream,
+    scan_local_models,
+)
 
+
+# ---------------------------------------------------------------------------
+# Model slot card widget
+# ---------------------------------------------------------------------------
+
+class ModelSlotCard(QFrame):
+    """A compact card representing one AI model slot (PRIMARY / SECONDARY / TERTIARY)."""
+
+    SLOT_COLORS = {
+        "PRIMARY":   "#00e5ff",   # cyan
+        "SECONDARY": "#00ff9d",   # green
+        "TERTIARY":  "#9945ff",   # purple
+    }
+
+    def __init__(self, slot_name: str, model_list: list, parent=None):
+        super().__init__(parent)
+        self.slot_name = slot_name
+        self._color = self.SLOT_COLORS.get(slot_name, C["cyan"])
+        self.setObjectName("ModelSlotCard")
+        self.setStyleSheet(f"""
+            QFrame#ModelSlotCard {{
+                background: {C['panel']};
+                border: 1px solid {C['border']};
+                border-left: 3px solid {self._color};
+                border-radius: 2px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        # Header row: slot name + active radio + LED
+        header = QHBoxLayout()
+        slot_lbl = QLabel(slot_name)
+        slot_lbl.setStyleSheet(
+            f"color:{self._color};font-size:9px;font-weight:bold;letter-spacing:3px;"
+        )
+        header.addWidget(slot_lbl)
+        header.addStretch()
+
+        self.active_btn = QPushButton("SET ACTIVE")
+        self.active_btn.setFixedHeight(18)
+        self.active_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['raised']}; color: {C['text2']};
+                border: 1px solid {C['border2']}; border-radius:1px;
+                font-size:8px; letter-spacing:1px; padding:0 6px;
+            }}
+            QPushButton:hover {{ border-color:{self._color}; color:{self._color}; }}
+            QPushButton:checked {{
+                background:{self._color}; color:{C['void']};
+                border-color:{self._color}; font-weight:bold;
+            }}
+        """)
+        self.active_btn.setCheckable(True)
+        header.addWidget(self.active_btn)
+
+        self.led = Led(8)
+        header.addWidget(self.led)
+        layout.addLayout(header)
+
+        # Model selector
+        model_row = QHBoxLayout()
+        self.model_cb = QComboBox()
+        self.model_cb.setStyleSheet(f"""
+            QComboBox {{
+                background:{C['deep']}; color:{C['text']};
+                border:1px solid {C['border']}; border-radius:2px; padding:3px 6px;
+                font-size:10px;
+            }}
+            QComboBox:focus {{ border-color:{self._color}; }}
+            QComboBox QAbstractItemView {{
+                background:{C['deep']}; color:{C['text']};
+                border:1px solid {C['border2']}; selection-background-color:{C['raised']};
+            }}
+        """)
+        self._populate_models(model_list)
+        model_row.addWidget(self.model_cb, 1)
+        layout.addLayout(model_row)
+
+        # Device + enable row
+        ctrl_row = QHBoxLayout()
+        self.device_cb = QComboBox()
+        self.device_cb.addItems(["cpu", "cuda:0", "cuda:1", "mps"])
+        self.device_cb.setFixedWidth(80)
+        self.device_cb.setStyleSheet(f"""
+            QComboBox {{
+                background:{C['deep']}; color:{C['text2']};
+                border:1px solid {C['border']}; border-radius:2px; padding:2px 4px;
+                font-size:9px;
+            }}
+        """)
+        ctrl_row.addWidget(self.device_cb)
+
+        self.enable_chk = QCheckBox("ON")
+        self.enable_chk.setStyleSheet(f"""
+            QCheckBox {{ color:{self._color}; font-size:9px; letter-spacing:2px; spacing:4px; }}
+            QCheckBox::indicator {{
+                width:11px; height:11px;
+                border:1px solid {self._color}; border-radius:1px;
+                background:{C['deep']};
+            }}
+            QCheckBox::indicator:checked {{ background:{self._color}; }}
+        """)
+        self.enable_chk.setChecked(True)
+        ctrl_row.addWidget(self.enable_chk)
+        ctrl_row.addStretch()
+
+        layout.addLayout(ctrl_row)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        self.btn_load = QPushButton("LOAD")
+        self.btn_load.setFixedHeight(22)
+        self.btn_load.setStyleSheet(f"""
+            QPushButton {{
+                background:{C['raised']}; color:{self._color};
+                border:1px solid {self._color}; border-radius:1px;
+                font-size:9px; letter-spacing:2px;
+            }}
+            QPushButton:hover {{ background:{self._color}; color:{C['void']}; }}
+            QPushButton:disabled {{ color:{C['text3']}; border-color:{C['border']}; background:{C['deep']}; }}
+        """)
+        btn_row.addWidget(self.btn_load)
+
+        self.btn_unload = QPushButton("UNLOAD")
+        self.btn_unload.setFixedHeight(22)
+        self.btn_unload.setEnabled(False)
+        self.btn_unload.setStyleSheet(f"""
+            QPushButton {{
+                background:{C['raised']}; color:{C['text2']};
+                border:1px solid {C['border2']}; border-radius:1px;
+                font-size:9px; letter-spacing:2px;
+            }}
+            QPushButton:hover {{ background:{C['red']}; color:white; border-color:{C['red']}; }}
+            QPushButton:disabled {{ color:{C['text3']}; border-color:{C['border']}; background:{C['deep']}; }}
+        """)
+        btn_row.addWidget(self.btn_unload)
+        layout.addLayout(btn_row)
+
+        # Status label
+        self.status_lbl = QLabel("NOT LOADED")
+        self.status_lbl.setStyleSheet(f"color:{C['text3']};font-size:9px;letter-spacing:1px;")
+        layout.addWidget(self.status_lbl)
+
+    def _populate_models(self, model_list):
+        self.model_cb.clear()
+        for name, label, path in model_list:
+            self.model_cb.addItem(label, userData={"name": name, "path": path})
+
+    def refresh_models(self, model_list):
+        current = self.model_cb.currentData()
+        self._populate_models(model_list)
+        # Try to restore selection
+        for i in range(self.model_cb.count()):
+            if self.model_cb.itemData(i) == current:
+                self.model_cb.setCurrentIndex(i)
+                break
+
+    def selected_model(self) -> str:
+        data = self.model_cb.currentData()
+        if isinstance(data, dict):
+            return data.get("name") or self.model_cb.currentText()
+        return data or self.model_cb.currentText()
+
+    def selected_model_ref(self) -> str:
+        data = self.model_cb.currentData()
+        if isinstance(data, dict):
+            return data.get("path") or data.get("name") or self.model_cb.currentText()
+        return data or self.model_cb.currentText()
+
+    def selected_device(self) -> str:
+        return self.device_cb.currentText()
+
+    def set_loaded(self, model_name: str, device: str):
+        self.btn_load.setEnabled(False)
+        self.btn_unload.setEnabled(True)
+        self.led.set(C["green"])
+        self.status_lbl.setText(f"LOADED  {model_name}  [{device}]")
+        self.status_lbl.setStyleSheet(f"color:{C['green']};font-size:9px;")
+
+    def set_unloaded(self):
+        self.btn_load.setEnabled(True)
+        self.btn_unload.setEnabled(False)
+        self.led.set(C["text3"])
+        self.status_lbl.setText("NOT LOADED")
+        self.status_lbl.setStyleSheet(f"color:{C['text3']};font-size:9px;")
+
+    def set_error(self, msg: str):
+        self.btn_load.setEnabled(True)
+        self.btn_unload.setEnabled(False)
+        self.led.set(C["red"], True)
+        self.status_lbl.setText(f"ERROR: {msg[:40]}")
+        self.status_lbl.setStyleSheet(f"color:{C['red']};font-size:9px;")
+
+    def set_active(self, is_active: bool):
+        self.active_btn.setChecked(is_active)
+        border_color = self.SLOT_COLORS.get(self.slot_name, C["cyan"])
+        bg = C["raised"] if is_active else C["panel"]
+        self.setStyleSheet(f"""
+            QFrame#ModelSlotCard {{
+                background: {bg};
+                border: 1px solid {'#243650' if not is_active else border_color};
+                border-left: 3px solid {border_color};
+                border-radius: 2px;
+            }}
+        """)
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
 
 class RoboNeural(QMainWindow):
+    RIGHT_HAND_SERVOS = [
+        ("S1", "THUMB", 9),
+        ("S2", "INDEX", 10),
+        ("S3", "MIDDLE", 11),
+        ("S4", "RING", 12),
+        ("S5", "PINKY", "A0"),
+    ]
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("⬡  ROBO NEURAL COMMAND")
@@ -46,7 +275,11 @@ class RoboNeural(QMainWindow):
         self.ssh = SSHWorker()
         self.yolo = YoloStream()
         self.ard = ArduinoWorker()
-        self.local_ai = LocalYoloEngine()
+
+        # Multi-model manager replaces single LocalYoloEngine
+        self.model_mgr = YoloModelManager()
+
+        self.local_ai = self.model_mgr.active_engine()
 
         self.ssh.out.connect(self._ssh_out)
         self.ssh.status.connect(self._ssh_status)
@@ -57,8 +290,6 @@ class RoboNeural(QMainWindow):
         self.ard.rx.connect(self._ard_rx)
         self.ard.status.connect(self._ard_status)
 
-        self.brain = RobotBrain(self._brain_cmd)
-
         self._fps = 0.0
         self._latency = 0.0
         self._det_count = 0
@@ -68,6 +299,12 @@ class RoboNeural(QMainWindow):
         self._selected_photo = ""
         self._photo_result_path = ""
         self._ai_backend = "remote"
+        self.ocr_engine = LocalOcrEngine()
+        self._ocr_items = []
+        self._right_hand_widgets = {}
+
+        # Cached model scan results
+        self._model_list = scan_local_models()
 
         self._build_ui()
         self._ai_backend_changed(self.ai_backend_cb.currentText())
@@ -78,6 +315,14 @@ class RoboNeural(QMainWindow):
         self._ping_timer.timeout.connect(self._ping)
         self._ping_timer.start(4000)
         self._ping()
+
+        self._ai_status_timer = QTimer(self)
+        self._ai_status_timer.timeout.connect(self._refresh_ai_status_tab)
+        self._ai_status_timer.start(1000)
+
+    # -----------------------------------------------------------------------
+    # UI build
+    # -----------------------------------------------------------------------
 
     def _build_ui(self):
         root = QWidget()
@@ -126,9 +371,7 @@ class RoboNeural(QMainWindow):
 
         self.srv_led = Led(10)
         self.srv_lbl = QLabel("OFFLINE")
-        self.srv_lbl.setStyleSheet(
-            f"color:{C['text2']};font-size:9px;letter-spacing:3px;"
-        )
+        self.srv_lbl.setStyleSheet(f"color:{C['text2']};font-size:9px;letter-spacing:3px;")
         layout.addWidget(self.srv_led)
         layout.addWidget(self.srv_lbl)
         return bar
@@ -142,6 +385,7 @@ class RoboNeural(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        # SSH
         ssh_box = QGroupBox("SSH TERMINAL")
         ssh_layout = QVBoxLayout(ssh_box)
         self.ssh_enable = QCheckBox("Включить SSH терминал")
@@ -187,6 +431,7 @@ class RoboNeural(QMainWindow):
         ssh_layout.addWidget(self.ssh_panel)
         layout.addWidget(ssh_box)
 
+        # Arduino / ESP
         ard_box = QGroupBox("ARDUINO / ESP DEVICES")
         ard_layout = QVBoxLayout(ard_box)
         ard_layout.setSpacing(5)
@@ -199,9 +444,7 @@ class RoboNeural(QMainWindow):
         ard_layout.addLayout(row)
 
         usb_lbl = QLabel("── USB SERIAL ──")
-        usb_lbl.setStyleSheet(
-            f"color:{C['text3']};font-size:9px;letter-spacing:2px;margin-top:4px;"
-        )
+        usb_lbl.setStyleSheet(f"color:{C['text3']};font-size:9px;letter-spacing:2px;margin-top:4px;")
         ard_layout.addWidget(usb_lbl)
 
         row = QHBoxLayout()
@@ -223,9 +466,7 @@ class RoboNeural(QMainWindow):
         ard_layout.addLayout(row)
 
         wifi_lbl = QLabel("── WIFI HTTP ──")
-        wifi_lbl.setStyleSheet(
-            f"color:{C['text3']};font-size:9px;letter-spacing:2px;margin-top:4px;"
-        )
+        wifi_lbl.setStyleSheet(f"color:{C['text3']};font-size:9px;letter-spacing:2px;margin-top:4px;")
         ard_layout.addWidget(wifi_lbl)
         self.wifi_en = QCheckBox("ESP WiFi режим")
         ard_layout.addWidget(self.wifi_en)
@@ -236,9 +477,7 @@ class RoboNeural(QMainWindow):
         ard_layout.addLayout(row)
 
         bt_lbl = QLabel("── BLUETOOTH ──")
-        bt_lbl.setStyleSheet(
-            f"color:{C['text3']};font-size:9px;letter-spacing:2px;margin-top:4px;"
-        )
+        bt_lbl.setStyleSheet(f"color:{C['text3']};font-size:9px;letter-spacing:2px;margin-top:4px;")
         ard_layout.addWidget(bt_lbl)
         self.bt_en = QCheckBox("BLE режим")
         ard_layout.addWidget(self.bt_en)
@@ -265,6 +504,7 @@ class RoboNeural(QMainWindow):
         ard_layout.addLayout(buttons_row)
         layout.addWidget(ard_box)
 
+        # Vision stream
         vis_box = QGroupBox("VISION STREAM")
         vis_layout = QVBoxLayout(vis_box)
         vis_layout.setSpacing(5)
@@ -278,7 +518,7 @@ class RoboNeural(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(self._label("SRC", 9, fixed=30))
         self.cam_src = QLineEdit("0")
-        self.cam_src.setPlaceholderText("0 / rtsp://...")
+        self.cam_src.setPlaceholderText("0 / rtsp:// / http://esp32-ip/stream")
         row.addWidget(self.cam_src)
         vis_layout.addLayout(row)
 
@@ -289,9 +529,22 @@ class RoboNeural(QMainWindow):
         self.conf_sl.setValue(25)
         self.conf_lbl = QLabel("0.25")
         self.conf_lbl.setFixedWidth(34)
-        self.conf_sl.valueChanged.connect(lambda value: self.conf_lbl.setText(f"{value / 100:.2f}"))
+        self.conf_sl.valueChanged.connect(lambda v: self.conf_lbl.setText(f"{v / 100:.2f}"))
         row.addWidget(self.conf_sl)
         row.addWidget(self.conf_lbl)
+        vis_layout.addLayout(row)
+
+        row = QHBoxLayout()
+        self.ocr_live_chk = QCheckBox("OCR")
+        self.ocr_live_chk.setChecked(False)
+        self.ocr_live_chk.stateChanged.connect(lambda _state: self._sync_local_stream_engine())
+        row.addWidget(self.ocr_live_chk)
+        row.addWidget(self._label("LANG", 9, fixed=34))
+        self.ocr_lang_in = QLineEdit("eng")
+        self.ocr_lang_in.setPlaceholderText("eng / rus / eng+rus")
+        self.ocr_lang_in.editingFinished.connect(self._sync_local_stream_engine)
+        row.addWidget(self.ocr_lang_in)
+        row.addStretch()
         vis_layout.addLayout(row)
 
         buttons_row = QHBoxLayout()
@@ -305,49 +558,104 @@ class RoboNeural(QMainWindow):
         vis_layout.addLayout(buttons_row)
         layout.addWidget(vis_box)
 
-        ai_box = QGroupBox("AI ENGINE")
-        ai_layout = QVBoxLayout(ai_box)
-        ai_layout.setSpacing(5)
-
-        row = QHBoxLayout()
-        row.addWidget(self._label("BACKEND", 9, fixed=52))
-        self.ai_backend_cb = QComboBox()
-        self.ai_backend_cb.addItems(["SERVER HTTP", "LOCAL YOLOv11s"])
-        self.ai_backend_cb.currentTextChanged.connect(self._ai_backend_changed)
-        row.addWidget(self.ai_backend_cb)
-        ai_layout.addLayout(row)
-
-        row = QHBoxLayout()
-        row.addWidget(self._label("MODEL", 9, fixed=52))
-        self.ai_model_in = QLineEdit("yolo11s.pt")
-        row.addWidget(self.ai_model_in)
-        ai_layout.addLayout(row)
-
-        row = QHBoxLayout()
-        row.addWidget(self._label("DEVICE", 9, fixed=52))
-        self.ai_device_cb = QComboBox()
-        self.ai_device_cb.addItems(["cpu", "cuda:0"])
-        row.addWidget(self.ai_device_cb)
-        ai_layout.addLayout(row)
-
-        buttons_row = QHBoxLayout()
-        self.btn_ai_load = self._btn("LOAD AI", C["green_dim"])
-        self.btn_ai_load.clicked.connect(self._ai_load)
-        buttons_row.addWidget(self.btn_ai_load)
-        self.btn_ai_unload = self._btn("UNLOAD")
-        self.btn_ai_unload.clicked.connect(self._ai_unload)
-        buttons_row.addWidget(self.btn_ai_unload)
-        self.ai_led = Led(8)
-        buttons_row.addWidget(self.ai_led)
-        self.ai_lbl = QLabel("REMOTE")
-        self.ai_lbl.setStyleSheet(f"color:{C['text2']};font-size:9px;")
-        buttons_row.addWidget(self.ai_lbl)
-        buttons_row.addStretch()
-        ai_layout.addLayout(buttons_row)
-        layout.addWidget(ai_box)
+        # AI ENGINE — multi-model panel
+        layout.addWidget(self._ai_engine_panel())
 
         layout.addStretch()
         return widget
+
+    def _ai_engine_panel(self) -> QGroupBox:
+        """Build the full AI ENGINE panel with backend selector + 3 model slot cards."""
+        ai_box = QGroupBox("AI ENGINE")
+        ai_layout = QVBoxLayout(ai_box)
+        ai_layout.setSpacing(6)
+
+        # Backend selector row
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(self._label("BACKEND", 9, fixed=56))
+        self.ai_backend_cb = QComboBox()
+        self.ai_backend_cb.addItems(["SERVER HTTP", "LOCAL YOLO"])
+        self.ai_backend_cb.currentTextChanged.connect(self._ai_backend_changed)
+        backend_row.addWidget(self.ai_backend_cb, 1)
+
+        # Scan button
+        self.btn_scan_models = QPushButton("⟳ SCAN")
+        self.btn_scan_models.setFixedHeight(24)
+        self.btn_scan_models.setFixedWidth(64)
+        self.btn_scan_models.setStyleSheet(f"""
+            QPushButton {{
+                background:{C['raised']}; color:{C['cyan']};
+                border:1px solid {C['border2']}; border-radius:2px;
+                font-size:9px; letter-spacing:1px;
+            }}
+            QPushButton:hover {{ background:{C['surface']}; border-color:{C['cyan']}; }}
+        """)
+        self.btn_scan_models.clicked.connect(self._scan_models)
+        backend_row.addWidget(self.btn_scan_models)
+        ai_layout.addLayout(backend_row)
+
+        # Active slot indicator
+        active_row = QHBoxLayout()
+        active_row.addWidget(self._label("ACTIVE", 9, fixed=56))
+        self.active_slot_lbl = QLabel("PRIMARY")
+        self.active_slot_lbl.setStyleSheet(
+            f"color:{C['cyan']};font-size:9px;font-weight:bold;letter-spacing:2px;"
+        )
+        active_row.addWidget(self.active_slot_lbl)
+        active_row.addStretch()
+        self.ai_led = Led(8)
+        active_row.addWidget(self.ai_led)
+        self.ai_lbl = QLabel("REMOTE")
+        self.ai_lbl.setStyleSheet(f"color:{C['text2']};font-size:9px;")
+        active_row.addWidget(self.ai_lbl)
+        ai_layout.addLayout(active_row)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color:{C['border']};")
+        ai_layout.addWidget(sep)
+
+        # Model slot cards inside a scroll area (they can be tall)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical { width: 4px; background: transparent; }
+            QScrollBar::handle:vertical { background: #1a2840; border-radius: 2px; }
+        """)
+        cards_widget = QWidget()
+        cards_widget.setStyleSheet("background: transparent;")
+        cards_layout = QVBoxLayout(cards_widget)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(5)
+
+        self._slot_cards: dict[str, ModelSlotCard] = {}
+        for slot in ["PRIMARY", "SECONDARY", "TERTIARY"]:
+            card = ModelSlotCard(slot, self._model_list)
+            card.btn_load.clicked.connect(lambda _=False, s=slot: self._ai_load(s))
+            card.btn_unload.clicked.connect(lambda _=False, s=slot: self._ai_unload(s))
+            card.active_btn.clicked.connect(lambda _=False, s=slot: self._ai_set_active(s))
+            card.enable_chk.stateChanged.connect(
+                lambda state, s=slot: self._ai_enable_toggle(s, state)
+            )
+            self._slot_cards[slot] = card
+            cards_layout.addWidget(card)
+
+        cards_layout.addStretch()
+        scroll.setWidget(cards_widget)
+        scroll.setMinimumHeight(300)
+        ai_layout.addWidget(scroll, 1)
+
+        # Mark PRIMARY as default active
+        self._slot_cards["PRIMARY"].set_active(True)
+
+        return ai_box
+
+    # -----------------------------------------------------------------------
+    # Center panel / tabs
+    # -----------------------------------------------------------------------
 
     def _center_panel(self):
         tabs = QTabWidget()
@@ -355,7 +663,9 @@ class RoboNeural(QMainWindow):
         tabs.addTab(self._tab_photo(), "PHOTO")
         tabs.addTab(self._tab_ssh(), "TERMINAL")
         tabs.addTab(self._tab_robot(), "ROBOT")
+        tabs.addTab(self._tab_right_hand(), "ПРАВАЯ РУКА")
         tabs.addTab(self._tab_arduino(), "ARDUINO")
+        tabs.addTab(self._tab_ai_status(), "AI STATUS")
         return tabs
 
     def _tab_vision(self):
@@ -368,8 +678,10 @@ class RoboNeural(QMainWindow):
         self.hud_fps = self._badge("FPS", "0.0", C["cyan"])
         self.hud_lat = self._badge("LAT", "0ms", C["amber"])
         self.hud_obj = self._badge("OBJ", "0", C["green"])
+        self.hud_ocr = self._badge("OCR", "0", C["green_dim"])
         self.hud_mode = self._badge("MODE", "—", C["purple"])
-        for badge in [self.hud_fps, self.hud_lat, self.hud_obj, self.hud_mode]:
+        self.hud_model = self._badge("MODEL", "—", C["cyan"])
+        for badge in [self.hud_fps, self.hud_lat, self.hud_obj, self.hud_ocr, self.hud_mode, self.hud_model]:
             hud.addWidget(badge)
         hud.addStretch()
         layout.addLayout(hud)
@@ -377,24 +689,20 @@ class RoboNeural(QMainWindow):
         self.vid = QLabel("NO SIGNAL")
         self.vid.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.vid.setMinimumHeight(380)
-        self.vid.setStyleSheet(
-            f"""
+        self.vid.setStyleSheet(f"""
             background:{C['void']};color:{C['text3']};
             border:1px solid {C['border']};
             font-size:20px;letter-spacing:8px;
-        """
-        )
+        """)
         layout.addWidget(self.vid, 1)
 
         self.det_view = QTextEdit()
         self.det_view.setReadOnly(True)
         self.det_view.setMaximumHeight(110)
-        self.det_view.setStyleSheet(
-            f"""
+        self.det_view.setStyleSheet(f"""
             background:{C['void']};color:{C['green']};
             border:1px solid {C['border']};font-size:11px;
-        """
-        )
+        """)
         layout.addWidget(self.det_view)
         return widget
 
@@ -404,7 +712,7 @@ class RoboNeural(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        source_box = QGroupBox("PHOTO SOURCE")
+        source_box = QGroupBox("SOURCE")
         source_layout = QVBoxLayout(source_box)
 
         path_row = QHBoxLayout()
@@ -466,8 +774,11 @@ class RoboNeural(QMainWindow):
         meta_row = QHBoxLayout()
         meta_row.addWidget(self._label("DATA", 9, fixed=34))
         self.photo_meta = QLineEdit()
-        self.photo_meta.setPlaceholderText("Доп. данные для ПК сервера: scene=lobby, camera=front")
+        self.photo_meta.setPlaceholderText("Доп. данные: scene=lobby, camera=front")
         meta_row.addWidget(self.photo_meta, 1)
+        self.photo_ocr_chk = QCheckBox("OCR")
+        self.photo_ocr_chk.setChecked(True)
+        meta_row.addWidget(self.photo_ocr_chk)
         action_layout.addLayout(meta_row)
 
         buttons_row = QHBoxLayout()
@@ -525,37 +836,6 @@ class RoboNeural(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        link_box = QGroupBox("AI LINK")
-        link_layout = QHBoxLayout(link_box)
-        link_layout.addWidget(self._label("SOURCE", 9, fixed=52))
-        self.ai_source_lbl = QLabel("SERVER HTTP")
-        self.ai_source_lbl.setStyleSheet(f"color:{C['cyan']};font-weight:bold;")
-        link_layout.addWidget(self.ai_source_lbl)
-        link_layout.addStretch()
-        self.ai_link_on = QCheckBox("Связать ИИ с роботом")
-        self.ai_link_on.stateChanged.connect(self._ai_link_toggle)
-        link_layout.addWidget(self.ai_link_on)
-        layout.addWidget(link_box)
-
-        ai_box = QGroupBox("AI АВТОНОМНЫЙ МОЗГ")
-        ai_layout = QHBoxLayout(ai_box)
-        self.ai_on = QCheckBox("ИИ управляет роботом")
-        self.ai_on.setStyleSheet(f"color:{C['amber']};font-size:12px;font-weight:bold;")
-        self.ai_on.stateChanged.connect(self._ai_toggle)
-        ai_layout.addWidget(self.ai_on)
-        ai_layout.addStretch()
-        ai_layout.addWidget(QLabel("РЕЖИМ:"))
-        self.ai_mode_cb = QComboBox()
-        self.ai_mode_cb.addItems(["FOLLOW", "PATROL", "AVOID", "GUARD"])
-        self.ai_mode_cb.currentTextChanged.connect(self.brain.set_mode)
-        ai_layout.addWidget(self.ai_mode_cb)
-        ai_layout.addWidget(QLabel("ЦЕЛЬ:"))
-        self.ai_target = QComboBox()
-        self.ai_target.addItems(["person", "car", "bicycle", "cat", "dog", "bottle"])
-        self.ai_target.currentTextChanged.connect(self.brain.set_target)
-        ai_layout.addWidget(self.ai_target)
-        layout.addWidget(ai_box)
-
         move_box = QGroupBox("ДВИЖЕНИЕ")
         grid = QGridLayout(move_box)
         grid.setSpacing(6)
@@ -573,11 +853,15 @@ class RoboNeural(QMainWindow):
             QPushButton:hover{{background:{C['blue']};border-color:{C['cyan']};}}
             QPushButton:pressed{{background:{C['cyan']};color:{C['void']};}}
         """
-        for label, row, col, cmd in moves:
+        for label, row_idx, col_idx, cmd in moves:
             button = QPushButton(label)
-            button.setStyleSheet(button_style if cmd != "STOP" else button_style.replace(C["text"], C["red"]))
-            button.clicked.connect(lambda _checked=False, direction=cmd: self._move(direction))
-            grid.addWidget(button, row, col)
+            button.setStyleSheet(
+                button_style if cmd != "STOP" else button_style.replace(C["text"], C["red"])
+            )
+            button.clicked.connect(
+                lambda _checked=False, direction=cmd: self._move(direction)
+            )
+            grid.addWidget(button, row_idx, col_idx)
 
         speed_row = QHBoxLayout()
         speed_row.addWidget(self._label("SPEED", 9, fixed=46))
@@ -586,30 +870,93 @@ class RoboNeural(QMainWindow):
         self.spd_sl.setValue(130)
         self.spd_lbl = QLabel("130")
         self.spd_lbl.setFixedWidth(32)
-        self.spd_sl.valueChanged.connect(lambda value: self.spd_lbl.setText(str(value)))
+        self.spd_sl.valueChanged.connect(lambda v: self.spd_lbl.setText(str(v)))
         speed_row.addWidget(self.spd_sl)
         speed_row.addWidget(self.spd_lbl)
         grid.addLayout(speed_row, 3, 0, 1, 3)
         layout.addWidget(move_box)
 
-        arm_box = QGroupBox("МАНИПУЛЯТОР")
-        arm_grid = QGridLayout(arm_box)
-        arm_grid.setSpacing(4)
-        for i, name in enumerate(["BASE", "SHOULDER", "ELBOW", "WRIST", "GRIPPER"]):
-            arm_grid.addWidget(self._label(name, 9, fixed=72), i, 0)
+        layout.addStretch()
+        return widget
+
+    def _tab_right_hand(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        head = QGroupBox("ПРАВАЯ РУКА · РУЧНОЕ УПРАВЛЕНИЕ")
+        head_layout = QHBoxLayout(head)
+        title = QLabel("Диапазон сервоприводов: 0° … 180°")
+        title.setStyleSheet(f"color:{C['cyan']};font-weight:bold;font-size:12px;")
+        head_layout.addWidget(title)
+        head_layout.addStretch()
+        btn_home = self._btn("ВСЕ В 0°", C["amber"])
+        btn_home.clicked.connect(self._home_all_right_hand)
+        head_layout.addWidget(btn_home)
+        btn_status = self._btn("ОБНОВИТЬ СТАТУС")
+        btn_status.clicked.connect(lambda: self._ard_send("STATUS"))
+        head_layout.addWidget(btn_status)
+        layout.addWidget(head)
+
+        hand_box = QGroupBox("СЕРВОПРИВОДЫ")
+        hand_grid = QGridLayout(hand_box)
+        hand_grid.setHorizontalSpacing(10)
+        hand_grid.setVerticalSpacing(8)
+        for row, (sid, name, pin) in enumerate(self.RIGHT_HAND_SERVOS):
+            hand_grid.addWidget(self._label(f"{name} ({sid})", 10, fixed=118), row, 0)
+
             slider = QSlider(Qt.Orientation.Horizontal)
             slider.setRange(0, 180)
-            slider.setValue(90)
-            value_lbl = QLabel("90°")
-            value_lbl.setStyleSheet(f"color:{C['cyan']};")
-            value_lbl.setFixedWidth(38)
-            slider.valueChanged.connect(
-                lambda value, lbl=value_lbl, servo_name=name: (lbl.setText(f"{value}°"), self._servo(servo_name, value))
+            slider.setValue(0)
+            slider.setStyleSheet(
+                f"QSlider::groove:horizontal{{height:8px;background:{C['panel']};border:1px solid {C['border']};}}"
+                f"QSlider::handle:horizontal{{width:16px;background:{C['cyan']};margin:-4px 0;border-radius:2px;}}"
             )
-            arm_grid.addWidget(slider, i, 1)
-            arm_grid.addWidget(value_lbl, i, 2)
-        layout.addWidget(arm_box)
+            hand_grid.addWidget(slider, row, 1)
 
+            angle_lbl = QLabel("0°")
+            angle_lbl.setStyleSheet(f"color:{C['green']};font-weight:bold;")
+            angle_lbl.setFixedWidth(44)
+            hand_grid.addWidget(angle_lbl, row, 2)
+
+            pin_lbl = QLabel(f"PIN {pin}")
+            pin_lbl.setStyleSheet(f"color:{C['text3']};font-size:9px;")
+            pin_lbl.setFixedWidth(50)
+            hand_grid.addWidget(pin_lbl, row, 3)
+
+            for col, fixed_angle in enumerate([0, 90, 180], start=4):
+                btn = QPushButton(str(fixed_angle))
+                btn.setFixedWidth(42)
+                btn.setStyleSheet("font-size:9px;")
+                btn.clicked.connect(
+                    lambda _=False, s=sid, a=fixed_angle: self._set_right_hand_angle(s, a)
+                )
+                hand_grid.addWidget(btn, row, col)
+
+            sweep_btn = QPushButton("SWEEP")
+            sweep_btn.setFixedWidth(64)
+            sweep_btn.setStyleSheet("font-size:9px;letter-spacing:1px;")
+            sweep_btn.clicked.connect(lambda _=False, s=sid: self._run_servo_sweep(s))
+            hand_grid.addWidget(sweep_btn, row, 7)
+
+            slider.valueChanged.connect(
+                lambda angle, s=sid, lbl=angle_lbl: (
+                    lbl.setText(f"{angle}°"),
+                    self._set_right_hand_angle(s, angle, from_slider=True),
+                )
+            )
+
+            self._right_hand_widgets[sid] = {
+                "slider": slider,
+                "label": angle_lbl,
+            }
+
+        layout.addWidget(hand_box)
+
+        info = QLabel("Профили: S1=THUMB, S2=INDEX, S3=MIDDLE, S4=RING, S5=PINKY")
+        info.setStyleSheet(f"color:{C['text2']};font-size:10px;")
+        layout.addWidget(info)
         layout.addStretch()
         return widget
 
@@ -625,7 +972,7 @@ class RoboNeural(QMainWindow):
         layout.addWidget(self.ard_mon, 1)
         row = QHBoxLayout()
         self.ard_in = QLineEdit()
-        self.ard_in.setPlaceholderText("Команда Arduino (LED:ON, MOTOR:FWD:200...)")
+        self.ard_in.setPlaceholderText("Команда Arduino (например: SERVO:S1:SET:90)")
         self.ard_in.returnPressed.connect(self._ard_send_manual)
         row.addWidget(self.ard_in)
         button = self._btn("SEND")
@@ -637,14 +984,8 @@ class RoboNeural(QMainWindow):
         sensor_grid = QGridLayout(sensor_box)
         self._sensor_labels = {}
         sensors = [
-            ("ROBOT", "ROBOT"),
-            ("IR", "IR"),
-            ("ULTRA", "ULTRA"),
-            ("BUMPER", "BUMPER"),
-            ("IMU", "IMU"),
-            ("TEMP", "TEMP"),
-            ("BATTERY", "BATTERY"),
-            ("ESP_RSSI", "ESP_RSSI"),
+            ("ROBOT", "ROBOT"), ("IR", "IR"), ("ULTRA", "ULTRA"), ("BUMPER", "BUMPER"),
+            ("IMU", "IMU"), ("TEMP", "TEMP"), ("BATTERY", "BATTERY"), ("ESP_RSSI", "ESP_RSSI"),
         ]
         for i, (label, key) in enumerate(sensors):
             sensor_grid.addWidget(self._label(label, 9, fixed=72), i, 0)
@@ -657,14 +998,110 @@ class RoboNeural(QMainWindow):
 
         quick_box = QGroupBox("БЫСТРЫЕ КОМАНДЫ")
         quick_layout = QHBoxLayout(quick_box)
-        for cmd in ["LED:ON", "LED:OFF", "RESET", "STATUS", "MOTOR:STOP", "SERVO:CENTER"]:
-            quick_button = QPushButton(cmd)
-            quick_button.setFixedHeight(26)
-            quick_button.setStyleSheet("font-size:9px;letter-spacing:1px;")
-            quick_button.clicked.connect(lambda _checked=False, value=cmd: self._ard_quick(value))
-            quick_layout.addWidget(quick_button)
+        for cmd in ["STATUS", "MOTOR:STOP", "SERVO:ALL:HOME"]:
+            qb = QPushButton(cmd)
+            qb.setFixedHeight(26)
+            qb.setStyleSheet("font-size:9px;letter-spacing:1px;")
+            qb.clicked.connect(lambda _=False, v=cmd: self._ard_quick(v))
+            quick_layout.addWidget(qb)
         layout.addWidget(quick_box)
         return widget
+
+    def _tab_ai_status(self):
+        """Dedicated AI STATUS tab — live overview of all model slots."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("MODEL SLOT STATUS")
+        title.setStyleSheet(
+            f"color:{C['cyan']};font-size:11px;font-weight:bold;letter-spacing:4px;"
+        )
+        layout.addWidget(title)
+
+        self._status_grid = QGridLayout()
+        self._status_grid.setSpacing(4)
+        headers = ["SLOT", "MODEL", "DEVICE", "STATE", "ENABLED", "ACTIVE"]
+        for col, h in enumerate(headers):
+            lbl = QLabel(h)
+            lbl.setStyleSheet(
+                f"color:{C['text3']};font-size:9px;letter-spacing:2px;border-bottom:1px solid {C['border']};"
+            )
+            self._status_grid.addWidget(lbl, 0, col)
+
+        self._status_rows: dict[str, list] = {}
+        for row_idx, slot in enumerate(["PRIMARY", "SECONDARY", "TERTIARY"], start=1):
+            color = ModelSlotCard.SLOT_COLORS.get(slot, C["cyan"])
+            row_labels = []
+            vals = [slot, "—", "—", "NOT LOADED", "YES", "—"]
+            for col, val in enumerate(vals):
+                lbl = QLabel(val)
+                lbl.setStyleSheet(
+                    f"color:{color if col == 0 else C['text']};font-size:10px;padding:2px 4px;"
+                )
+                self._status_grid.addWidget(lbl, row_idx, col)
+                row_labels.append(lbl)
+            self._status_rows[slot] = row_labels
+
+        layout.addLayout(self._status_grid)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color:{C['border']};margin-top:8px;")
+        layout.addWidget(sep)
+
+        # Refresh button
+        btn_refresh = self._btn("⟳ REFRESH STATUS", C["blue"])
+        btn_refresh.setFixedWidth(180)
+        btn_refresh.clicked.connect(lambda: self._refresh_ai_status_tab(log_event=True))
+        layout.addWidget(btn_refresh)
+
+        # Log
+        self._ai_status_log = QTextEdit()
+        self._ai_status_log.setReadOnly(True)
+        self._ai_status_log.setStyleSheet(
+            f"background:{C['void']};color:{C['text2']};border:1px solid {C['border']};font-size:10px;"
+        )
+        layout.addWidget(self._ai_status_log, 1)
+
+        layout.addStretch()
+
+        # Initial refresh
+        QTimer.singleShot(200, self._refresh_ai_status_tab)
+        return widget
+
+    def _refresh_ai_status_tab(self, log_event: bool = False):
+        summary = self.model_mgr.status_summary()
+        for slot, info in summary.items():
+            row = self._status_rows.get(slot)
+            if not row:
+                continue
+            row[1].setText(info["model"] or "—")
+            row[2].setText(info["device"])
+            state = "LOADED" if info["loaded"] else "NOT LOADED"
+            color = C["green"] if info["loaded"] else C["text3"]
+            row[3].setText(state)
+            row[3].setStyleSheet(f"color:{color};font-size:10px;padding:2px 4px;")
+            row[4].setText("ON" if info["enabled"] else "OFF")
+            row[4].setStyleSheet(
+                f"color:{C['green'] if info['enabled'] else C['red']};font-size:10px;padding:2px 4px;"
+            )
+            row[5].setText("◉ ACTIVE" if info["active"] else "—")
+            row[5].setStyleSheet(
+                f"color:{C['cyan'] if info['active'] else C['text3']};font-size:10px;padding:2px 4px;"
+            )
+
+        if log_event:
+            ts = time.strftime("%H:%M:%S")
+            self._ai_status_log.append(
+                f'<span style="color:{C["text3"]}">[{ts}]</span> '
+                f'<span style="color:{C["text2"]}">Status refreshed</span>'
+            )
+
+    # -----------------------------------------------------------------------
+    # Right panel
+    # -----------------------------------------------------------------------
 
     def _right_panel(self):
         widget = QWidget()
@@ -685,22 +1122,18 @@ class RoboNeural(QMainWindow):
         stats_box = QGroupBox("SYSTEM STATS")
         stats_grid = QGridLayout(stats_box)
         self._stats = {}
-        for i, (name, key) in enumerate(
-            [
-                ("FPS", "fps"),
-                ("LATENCY", "latency"),
-                ("OBJECTS", "objects"),
-                ("TRACKS", "tracks"),
-                ("AI MODE", "ai_mode"),
-                ("ROBOT", "robot_cmd"),
-            ]
-        ):
-            stats_grid.addWidget(self._label(name, 9, fixed=64), i, 0)
+        for i, (name, key) in enumerate([
+            ("FPS", "fps"), ("LATENCY", "latency"), ("OBJECTS", "objects"),
+            ("TRACKS", "tracks"), ("OCR TEXT", "ocr_text"), ("CONTROL", "control_mode"), ("ROBOT", "robot_cmd"),
+            ("ACTIVE MODEL", "active_model"),
+        ]):
+            stats_grid.addWidget(self._label(name, 9, fixed=88), i, 0)
             label = QLabel("—")
             label.setStyleSheet(f"color:{C['cyan']};font-weight:bold;")
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             stats_grid.addWidget(label, i, 1)
             self._stats[key] = label
+        self._stats["control_mode"].setText("MANUAL")
         layout.addWidget(stats_box)
 
         log_box = QGroupBox("SYSTEM LOG")
@@ -718,33 +1151,31 @@ class RoboNeural(QMainWindow):
     def _statusbar(self):
         bar = QFrame()
         bar.setFixedHeight(26)
-        bar.setStyleSheet(
-            f"QFrame{{background:{C['deep']};border-top:1px solid {C['border']};}}"
-        )
+        bar.setStyleSheet(f"QFrame{{background:{C['deep']};border-top:1px solid {C['border']};}}")
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(14, 0, 14, 0)
         self.status_lbl = QLabel("СИСТЕМА ИНИЦИАЛИЗИРОВАНА")
-        self.status_lbl.setStyleSheet(
-            f"color:{C['text2']};font-size:9px;letter-spacing:2px;"
-        )
+        self.status_lbl.setStyleSheet(f"color:{C['text2']};font-size:9px;letter-spacing:2px;")
         layout.addWidget(self.status_lbl)
         layout.addStretch()
-        version = QLabel("ROBO NEURAL v2.0  ·  YOLO11x  ·  CUDA 12.8  ·  RTX 5070 Ti")
+        version = QLabel("ROBO NEURAL v2.1  ·  MULTI-YOLO  ·  CUDA 13.0  ·  RTX 5070 Ti")
         version.setStyleSheet(f"color:{C['text3']};font-size:9px;")
         layout.addWidget(version)
         return bar
 
+    # -----------------------------------------------------------------------
+    # Widget helpers
+    # -----------------------------------------------------------------------
+
     def _btn(self, text, color=None):
         button = QPushButton(text)
         if color:
-            button.setStyleSheet(
-                f"""
+            button.setStyleSheet(f"""
                 QPushButton{{background:{color};color:white;border:none;border-radius:2px;
                 padding:5px 12px;font-size:10px;letter-spacing:2px;font-weight:bold;}}
-                QPushButton:hover{{filter:brightness(1.2);opacity:0.9;}}
+                QPushButton:hover{{opacity:0.9;}}
                 QPushButton:disabled{{background:{C['border']};color:{C['text3']};}}
-            """
-            )
+            """)
         return button
 
     def _label(self, text, size=12, fixed=None):
@@ -785,64 +1216,121 @@ class RoboNeural(QMainWindow):
         )
         self.status_lbl.setText(msg[:90])
 
-    def _refresh_ports(self):
-        self.ard_port.clear()
-        ports = [port.device for port in serial.tools.list_ports.comports()]
-        self.ard_port.addItems(ports if ports else ["(нет портов)"])
+    # -----------------------------------------------------------------------
+    # AI Engine — multi-model logic
+    # -----------------------------------------------------------------------
+
+    def _scan_models(self):
+        self._model_list = scan_local_models()
+        for card in self._slot_cards.values():
+            card.refresh_models(self._model_list)
+        count = sum(1 for n, l, p in self._model_list if l.startswith("[LOCAL]"))
+        self._log(f"Model scan: {count} local .pt files found", C["cyan"])
+
+    def _ai_load(self, slot: str):
+        card = self._slot_cards[slot]
+        model_name = card.selected_model()
+        model_ref = card.selected_model_ref()
+        device = card.selected_device()
+        self._log(f"Loading {model_name} on {slot} [{device}]...", C["amber"])
+        try:
+            self.model_mgr.load(slot, model_ref, device)
+            card.set_loaded(model_name, device)
+            self._log(f"{slot}: {model_name} loaded [{device}]", C["green"])
+            self._update_active_model_display()
+            self._refresh_ai_status_tab()
+        except Exception as exc:
+            card.set_error(str(exc))
+            self._log(f"{slot} load failed: {exc}", C["red"])
+            self._refresh_ai_status_tab()
+
+    def _ai_unload(self, slot: str):
+        self.model_mgr.unload(slot)
+        self._slot_cards[slot].set_unloaded()
+        self._log(f"{slot}: model unloaded", C["amber"])
+        self._update_active_model_display()
+        self._sync_local_stream_engine()
+        self._refresh_ai_status_tab()
+
+    def _ai_set_active(self, slot: str):
+        self.model_mgr.set_active(slot)
+        self.local_ai = self.model_mgr.active_engine()
+        # Update all card visual states
+        for s, card in self._slot_cards.items():
+            card.set_active(s == slot)
+        self.active_slot_lbl.setText(slot)
+        self._update_active_model_display()
+        self._sync_local_stream_engine()
+        self._refresh_ai_status_tab()
+        self._log(f"Active AI slot: {slot}", C["cyan"])
+
+    def _ai_enable_toggle(self, slot: str, state: int):
+        if state > 0:
+            self.model_mgr.enable(slot)
+            self._log(f"{slot}: AI enabled", C["green"])
+        else:
+            self.model_mgr.disable(slot)
+            self._log(f"{slot}: AI disabled", C["amber"])
+        self._update_active_model_display()
+        self._sync_local_stream_engine()
+        self._refresh_ai_status_tab()
+
+    def _update_active_model_display(self):
+        eng = self.model_mgr.active_engine()
+        model_short = (eng.model_name.replace(".pt", "") if eng.model_name else "—")
+        self._badge_set("MODEL", model_short)
+        if hasattr(self, "_stats"):
+            self._stats["active_model"].setText(model_short)
+        if eng.is_ready:
+            self.ai_led.set(C["green"])
+            self.ai_lbl.setText("LOCAL READY")
+            self.ai_lbl.setStyleSheet(f"color:{C['green']};font-size:9px;")
+        elif eng.model is not None and not eng.enabled:
+            self.ai_led.set(C["amber"])
+            self.ai_lbl.setText("DISABLED")
+            self.ai_lbl.setStyleSheet(f"color:{C['amber']};font-size:9px;")
+        else:
+            if self._ai_backend == "local":
+                self.ai_led.set(C["amber"], True)
+                self.ai_lbl.setText("NOT LOADED")
+                self.ai_lbl.setStyleSheet(f"color:{C['amber']};font-size:9px;")
 
     def _ai_backend_changed(self, text):
         is_local = "LOCAL" in text
         self._ai_backend = "local" if is_local else "remote"
-        self.ai_model_in.setEnabled(is_local)
-        self.ai_device_cb.setEnabled(is_local)
-        self.btn_ai_load.setEnabled(is_local)
-        self.btn_ai_unload.setEnabled(is_local)
+
+        # Cards only relevant for local mode
+        for card in self._slot_cards.values():
+            card.setEnabled(is_local)
+
         if is_local:
-            self.ai_source_lbl.setText("LOCAL YOLOv11s")
-            if self.local_ai.is_ready:
-                self.ai_led.set(C["green"])
-                self.ai_lbl.setText("LOCAL READY")
-                self.ai_lbl.setStyleSheet(f"color:{C['green']};font-size:9px;")
-            else:
-                self.ai_led.set(C["amber"], True)
-                self.ai_lbl.setText("LOCAL NOT LOADED")
-                self.ai_lbl.setStyleSheet(f"color:{C['amber']};font-size:9px;")
+            self._update_active_model_display()
+            self._sync_local_stream_engine()
         else:
-            self.ai_source_lbl.setText("SERVER HTTP")
             self.ai_led.set(C["cyan_dim"])
             self.ai_lbl.setText("REMOTE")
             self.ai_lbl.setStyleSheet(f"color:{C['text2']};font-size:9px;")
-        self._log(f"AI backend: {self.ai_source_lbl.text()}", C["cyan"])
 
-    def _ai_load(self):
-        model_name = self.ai_model_in.text().strip() or "yolo11s.pt"
-        device = self.ai_device_cb.currentText()
-        try:
-            self.local_ai.load(model_name, device)
-            self.ai_led.set(C["green"])
-            self.ai_lbl.setText("LOCAL READY")
-            self.ai_lbl.setStyleSheet(f"color:{C['green']};font-size:9px;")
-            self._log(f"Local AI loaded: {model_name} ({device})", C["green"])
-        except Exception as exc:
-            self.ai_led.set(C["red"])
-            self.ai_lbl.setText("LOCAL ERROR")
-            self.ai_lbl.setStyleSheet(f"color:{C['red']};font-size:9px;")
-            self._log(f"Local AI load failed: {exc}", C["red"])
+        self._refresh_ai_status_tab()
+        self._log(f"AI backend: {'LOCAL YOLO' if is_local else 'SERVER HTTP'}", C["cyan"])
 
-    def _ai_unload(self):
-        self.local_ai.unload()
-        self.ai_led.set(C["amber"], True)
-        self.ai_lbl.setText("LOCAL UNLOADED")
-        self.ai_lbl.setStyleSheet(f"color:{C['amber']};font-size:9px;")
-        self._log("Local AI unloaded", C["amber"])
+    def _sync_local_stream_engine(self):
+        self.yolo.set_backend(
+            self._ai_backend,
+            self.model_mgr.active_engine(),
+            self.ocr_engine,
+            self.ocr_live_chk.isChecked() if hasattr(self, "ocr_live_chk") else False,
+            self.ocr_lang_in.text().strip() if hasattr(self, "ocr_lang_in") else "eng",
+        )
 
-    def _ai_link_toggle(self, state):
-        desired = state > 0
-        if self.ai_on.isChecked() != desired:
-            self.ai_on.blockSignals(True)
-            self.ai_on.setChecked(desired)
-            self.ai_on.blockSignals(False)
-            self._ai_toggle(2 if desired else 0)
+    # -----------------------------------------------------------------------
+    # Misc handlers (unchanged logic from original)
+    # -----------------------------------------------------------------------
+
+    def _refresh_ports(self):
+        self.ard_port.clear()
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        self.ard_port.addItems(ports if ports else ["(нет портов)"])
 
     def _ping(self):
         ip = self.ip_in.text().strip()
@@ -925,10 +1413,10 @@ class RoboNeural(QMainWindow):
         src = self.cam_src.text().strip()
         mode = self.yolo_mode.currentText()
         conf = self.conf_sl.value() / 100
-        if self._ai_backend == "local" and not self.local_ai.is_ready:
-            self._log("Local AI not loaded. Click LOAD AI.", C["red"])
+        if self._ai_backend == "local" and not self.model_mgr.active_engine().is_ready:
+            self._log("Active AI not loaded or disabled", C["red"])
             return
-        self.yolo.set_backend(self._ai_backend, self.local_ai)
+        self.yolo.set_backend(self._ai_backend, self.model_mgr.active_engine())
         self.yolo.start_stream(self._server_url(), src, mode, conf)
         if self.yolo.isRunning():
             self.btn_cam_start.setEnabled(False)
@@ -943,9 +1431,11 @@ class RoboNeural(QMainWindow):
         self.vid.setText("NO SIGNAL")
         self.vid.setPixmap(QPixmap())
         self.det_view.clear()
+        self._ocr_items = []
+        self._badge_set("OCR", "0")
         self._log("Vision stopped", C["amber"])
 
-    def _on_frame(self, image: QImage, detections: list):
+    def _on_frame(self, image: QImage, detections: list, ocr_items: list):
         pixmap = QPixmap.fromImage(image).scaled(
             self.vid.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -953,28 +1443,34 @@ class RoboNeural(QMainWindow):
         )
         self.vid.setPixmap(pixmap)
         self._det_count = len(detections)
+        self._ocr_items = ocr_items or []
         self._badge_set("OBJ", str(self._det_count))
+        self._badge_set("OCR", str(len(self._ocr_items)))
         self._stats["objects"].setText(str(self._det_count))
+        if hasattr(self, "_stats"):
+            self._stats["ocr_text"].setText(str(len(self._ocr_items)))
         track_count = len([d for d in detections if d.get("track_id") is not None])
         self._stats["tracks"].setText(str(track_count))
-
         self.radar.update_objects(detections)
 
+        lines = []
         if detections:
-            lines = []
-            for detection in detections:
-                tid = detection.get("track_id")
+            for det in detections:
+                tid = det.get("track_id")
                 lines.append(
-                    f"  [{detection.get('class_name', '?')}]"
+                    f"  [{det.get('class_name', '?')}]"
                     + (f" #{tid}" if tid is not None else "")
-                    + f"  conf={detection.get('confidence', 0):.2f}"
+                    + f"  conf={det.get('confidence', 0):.2f}"
                 )
+        if self._ocr_items:
+            lines.append("")
+            lines.append("OCR:")
+            for item in self._ocr_items[:8]:
+                lines.append(f"  \"{item.get('text', '')}\"  conf={item.get('confidence', 0):.0f}")
+        if lines:
             self.det_view.setPlainText("\n".join(lines))
         else:
             self.det_view.clear()
-
-        if self.ai_on.isChecked():
-            self.brain.process(detections, frame_w=image.width(), frame_h=image.height())
 
     def _on_fps(self, fps, latency):
         self._fps = fps
@@ -991,7 +1487,7 @@ class RoboNeural(QMainWindow):
             self.ard_lbl.setText("WIFI MODE")
             return
         if self.bt_en.isChecked():
-            self._log(f"BLE mode: {self.bt_mac.text()} (async - нужен bleak)", C["purple"])
+            self._log(f"BLE mode: {self.bt_mac.text()}", C["purple"])
             self.ard_led.set(C["purple"], True)
             self.ard_lbl.setText("BLE MODE")
             return
@@ -1017,6 +1513,8 @@ class RoboNeural(QMainWindow):
         self.ard_lbl.setStyleSheet(f"color:{color};font-size:9px;")
         self.btn_ard_con.setEnabled(not ok)
         self.btn_ard_dis.setEnabled(ok)
+        if ok:
+            QTimer.singleShot(500, self._home_all_right_hand)
         self._log(msg, color)
 
     def _ard_rx(self, data):
@@ -1052,21 +1550,35 @@ class RoboNeural(QMainWindow):
         self._ard_send(f"MOVE:{direction}:{speed}")
         self._log(f"MOVE {direction} speed={speed}", C["cyan"])
 
-    def _servo(self, name, angle):
-        self._ard_send(f"SERVO:{name}:{angle}")
+    def _set_right_hand_angle(self, servo_id, angle, from_slider=False):
+        angle = max(0, min(180, int(angle)))
+        row = self._right_hand_widgets.get(servo_id)
+        if row:
+            slider = row["slider"]
+            if slider.value() != angle:
+                slider.blockSignals(True)
+                slider.setValue(angle)
+                slider.blockSignals(False)
+            row["label"].setText(f"{angle}°")
+        self._ard_send(f"SERVO:{servo_id}:SET:{angle}")
+        if not from_slider:
+            self._log(f"{servo_id} -> {angle}°", C["cyan"])
 
-    def _ai_toggle(self, state):
-        mode = self.ai_mode_cb.currentText() if state > 0 else "IDLE"
-        self.brain.set_mode(mode)
-        self._stats["ai_mode"].setText(mode)
-        self.ai_link_on.blockSignals(True)
-        self.ai_link_on.setChecked(state > 0)
-        self.ai_link_on.blockSignals(False)
-        self._log(f"AI Brain: {'ON -> ' + mode if state > 0 else 'OFF'}", C["amber"])
+    def _home_all_right_hand(self):
+        self._ard_send("SERVO:ALL:HOME")
+        for row in self._right_hand_widgets.values():
+            row["slider"].blockSignals(True)
+            row["slider"].setValue(0)
+            row["slider"].blockSignals(False)
+            row["label"].setText("0°")
+        self._log("Правая рука: все сервоприводы в 0°", C["green"])
 
-    def _brain_cmd(self, cmd):
-        self._ard_send(cmd)
-        self._log(f"AI CMD: {cmd}", C["purple"])
+    def _run_servo_sweep(self, servo_id):
+        for delay_ms, angle in [(0, 0), (650, 180), (1300, 0)]:
+            QTimer.singleShot(
+                delay_ms, lambda s=servo_id, a=angle: self._set_right_hand_angle(s, a)
+            )
+        self._log(f"{servo_id}: тест 0°→180°→0°", C["amber"])
 
     def _update_photo_target(self):
         target = self._connected_server_ip or self.ip_in.text().strip() or "manual ip"
@@ -1074,41 +1586,9 @@ class RoboNeural(QMainWindow):
             target = f"{target} ({self._connected_server_host})"
         self.photo_target_lbl.setText(target)
 
-    def _parse_sensor_line(self, data):
-        if not hasattr(self, "_sensor_labels"):
-            return
-        raw = data.strip()
-        prefixes = ["SENSOR:", "ESP32:", "ESP:"]
-        for prefix in prefixes:
-            if raw.startswith(prefix):
-                rest = raw[len(prefix) :].strip()
-                parts = rest.split(":")
-                if len(parts) < 2:
-                    return
-                key = parts[0].strip().upper()
-                value = ":".join(parts[1:]).strip()
-                if prefix.startswith("ESP") and key == "RSSI":
-                    key = "ESP_RSSI"
-                self._set_sensor_value(key, value)
-                return
-
-    def _set_sensor_value(self, key, value):
-        label = self._sensor_labels.get(key)
-        if not label:
-            return
-        label.setText(value)
-        if key == "ROBOT":
-            on = value.strip().lower() in {"1", "on", "true", "yes", "detected"}
-            label.setStyleSheet(f"color:{C['green'] if on else C['red']};font-weight:bold;")
-        else:
-            label.setStyleSheet(f"color:{C['cyan']};font-weight:bold;")
-
     def _pick_photo(self):
-        path, _selected_filter = QFileDialog.getOpenFileName(
-            self,
-            "Выбрать фото",
-            "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.webp)",
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выбрать фото", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
         if not path:
             return
@@ -1157,10 +1637,10 @@ class RoboNeural(QMainWindow):
             upload_path = self.photo_upload_path.text().strip() or "/upload"
             if not upload_path.startswith("/"):
                 upload_path = "/" + upload_path
-            with open(self._selected_photo, "rb") as photo_file:
+            with open(self._selected_photo, "rb") as f:
                 response = requests.post(
                     f"{self._server_url()}{upload_path}",
-                    files={"file": (os.path.basename(self._selected_photo), photo_file, "image/jpeg")},
+                    files={"file": (os.path.basename(self._selected_photo), f, "image/jpeg")},
                     data={"meta": self.photo_meta.text().strip()},
                     timeout=10,
                 )
@@ -1177,8 +1657,9 @@ class RoboNeural(QMainWindow):
             return
         mode = self.photo_mode.currentText()
         if self._ai_backend == "local":
-            if not self.local_ai.is_ready:
-                self._log("Local AI not loaded. Click LOAD AI.", C["red"])
+            eng = self.model_mgr.active_engine()
+            if not eng.is_ready:
+                self._log("Active AI not loaded. Load a model first.", C["red"])
                 return
             try:
                 import cv2
@@ -1189,23 +1670,31 @@ class RoboNeural(QMainWindow):
                 image = cv2.imread(self._selected_photo)
                 if image is None:
                     raise RuntimeError("Cannot read image")
-                detections = self.local_ai.infer_frame(image, mode, self.conf_sl.value() / 100)
+                detections = eng.infer_frame(image, mode, self.conf_sl.value() / 100)
+                ocr_items = []
+                if self.photo_ocr_chk.isChecked():
+                    ocr_items = self.ocr_engine.infer_frame(
+                        image,
+                        lang=self.ocr_lang_in.text().strip() or "eng",
+                    )
                 result = {
                     "backend": "local",
-                    "model": self.local_ai.model_name,
+                    "model": eng.model_name,
+                    "slot": self.model_mgr.active_slot(),
                     "mode": mode,
                     "detections": detections,
+                    "ocr": ocr_items,
                 }
                 text = json.dumps(result, ensure_ascii=False, indent=2)
                 self.photo_result.setPlainText(f"LOCAL YOLO {mode.upper()} RESULT\n\n{text}")
                 self._photo_result_path = self._render_local_ai_preview(
-                    image, detections, self._selected_photo
+                    image, detections, self._selected_photo, ocr_items
                 )
                 preview_path = self._photo_result_path or self._selected_photo
                 self._set_preview(self.photo_result_preview, preview_path, "RESULT PREVIEW")
                 self.photo_status_lbl.setText("DONE")
                 self.photo_status_lbl.setStyleSheet(f"color:{C['green']};font-size:10px;")
-                self._log(f"Photo analyzed via LOCAL YOLO [{mode}]", C["green"])
+                self._log(f"Photo analyzed via {eng.model_name} [{mode}]", C["green"])
             except Exception as exc:
                 self._log(f"Local YOLO failed: {exc}", C["red"])
                 self._photo_result_path = ""
@@ -1213,10 +1702,10 @@ class RoboNeural(QMainWindow):
                 self.photo_status_lbl.setStyleSheet(f"color:{C['red']};font-size:10px;")
         else:
             try:
-                with open(self._selected_photo, "rb") as photo_file:
+                with open(self._selected_photo, "rb") as f:
                     response = requests.post(
                         f"{self._server_url()}/{mode}",
-                        files={"file": (os.path.basename(self._selected_photo), photo_file, "image/jpeg")},
+                        files={"file": (os.path.basename(self._selected_photo), f, "image/jpeg")},
                         params={"conf": self.conf_sl.value() / 100},
                         timeout=10,
                     )
@@ -1244,39 +1733,67 @@ class RoboNeural(QMainWindow):
         self.photo_status_lbl.setText("DONE")
         self.photo_status_lbl.setStyleSheet(f"color:{C['green']};font-size:10px;")
 
-    def _render_local_ai_preview(self, image, detections, src_path):
+    def _render_local_ai_preview(self, image, detections, src_path, ocr_items=None):
         try:
             import cv2
         except ImportError:
             return ""
-
         try:
             canvas = image.copy()
-            for detection in detections:
-                box = detection.get("box", [0, 0, 0, 0])
+            for det in detections:
+                box = det.get("box", [0, 0, 0, 0])
                 x1, y1, x2, y2 = map(int, box)
-                name = detection.get("class_name", "?")
-                conf = detection.get("confidence", 0.0)
-                tid = detection.get("track_id")
+                name = det.get("class_name", "?")
+                conf = det.get("confidence", 0.0)
+                tid = det.get("track_id")
                 label = f"{name} {conf:.2f}" + (f" #{tid}" if tid is not None else "")
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 229, 255), 2)
                 cv2.rectangle(canvas, (x1, y1 - 18), (x1 + len(label) * 7, y1), (0, 229, 255), -1)
-                cv2.putText(
-                    canvas,
-                    label,
-                    (x1 + 2, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (4, 6, 10),
-                    1,
-                )
-
+                cv2.putText(canvas, label, (x1 + 2, y1 - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (4, 6, 10), 1)
+            for item in ocr_items or []:
+                x1, y1, x2, y2 = map(int, item.get("box", [0, 0, 0, 0]))
+                label = f"OCR {item.get('text', '')}"[:30]
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 157), 1)
+                top = max(0, y1 - 18)
+                cv2.rectangle(canvas, (x1, top), (x1 + min(len(label) * 7, 220), y1), (0, 255, 157), -1)
+                cv2.putText(canvas, label, (x1 + 2, max(12, y1 - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (4, 6, 10), 1)
             base = os.path.splitext(os.path.basename(src_path))[0]
             out_path = os.path.join("/tmp", f"{base}_local_ai.jpg")
             cv2.imwrite(out_path, canvas)
             return out_path
         except Exception:
             return ""
+
+    def _parse_sensor_line(self, data):
+        if not hasattr(self, "_sensor_labels"):
+            return
+        raw = data.strip()
+        prefixes = ["SENSOR:", "ESP32:", "ESP:"]
+        for prefix in prefixes:
+            if raw.startswith(prefix):
+                rest = raw[len(prefix):].strip()
+                parts = rest.split(":")
+                if len(parts) < 2:
+                    return
+                key = parts[0].strip().upper()
+                value = ":".join(parts[1:]).strip()
+                if prefix.startswith("ESP") and key == "RSSI":
+                    key = "ESP_RSSI"
+                self._set_sensor_value(key, value)
+                return
+
+    def _set_sensor_value(self, key, value):
+        label = self._sensor_labels.get(key)
+        if not label:
+            return
+        label.setText(value)
+        if key == "ROBOT":
+            on = value.strip().lower() in {"1", "on", "true", "yes", "detected"}
+            label.setStyleSheet(f"color:{C['green'] if on else C['red']};font-weight:bold;")
+        else:
+            label.setStyleSheet(f"color:{C['cyan']};font-weight:bold;")
 
     def closeEvent(self, event):
         self._ping_timer.stop()
