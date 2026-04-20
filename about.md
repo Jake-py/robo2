@@ -1,5 +1,5 @@
 # MG996R Control Notes
-
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC3Hy8QZqTm6cElFPGCFYE58gGb2MX+koZbiSV63awe5 red_ice@tds_server
 ## Что используется для отправки сигнала
 
 В проекте управление идет по `Serial` (USB-UART) между Python GUI и Arduino:

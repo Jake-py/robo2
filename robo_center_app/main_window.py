@@ -259,11 +259,26 @@ class ModelSlotCard(QFrame):
 
 class RoboNeural(QMainWindow):
     RIGHT_HAND_SERVOS = [
-        ("S1", "THUMB", 9),
-        ("S2", "INDEX", 10),
-        ("S3", "MIDDLE", 11),
-        ("S4", "RING", 12),
-        ("S5", "PINKY", "A0"),
+        ("P0", "PIN 0", 0),
+        ("P1", "PIN 1", 1),
+        ("P2", "PIN 2", 2),
+        ("P3", "PIN 3", 3),
+        ("P4", "PIN 4", 4),
+        ("P5", "PIN 5", 5),
+        ("P6", "PIN 6", 6),
+        ("P7", "PIN 7", 7),
+        ("P8", "PIN 8", 8),
+        ("P9", "PIN 9", 9),
+        ("P10", "PIN 10", 10),
+        ("P11", "PIN 11", 11),
+        ("P12", "PIN 12", 12),
+        ("P13", "PIN 13", 13),
+    ]
+
+    WHEEL_PINS = [
+        ("P0", 0), ("P1", 1), ("P2", 2), ("P3", 3), ("P4", 4),
+        ("P5", 5), ("P6", 6), ("P7", 7), ("P8", 8), ("P9", 9),
+        ("P10", 10), ("P11", 11), ("P12", 12),
     ]
 
     def __init__(self):
@@ -302,6 +317,7 @@ class RoboNeural(QMainWindow):
         self.ocr_engine = LocalOcrEngine()
         self._ocr_items = []
         self._right_hand_widgets = {}
+        self._wheel_widgets = {}
 
         # Cached model scan results
         self._model_list = scan_local_models()
@@ -664,6 +680,7 @@ class RoboNeural(QMainWindow):
         tabs.addTab(self._tab_ssh(), "TERMINAL")
         tabs.addTab(self._tab_robot(), "ROBOT")
         tabs.addTab(self._tab_right_hand(), "ПРАВАЯ РУКА")
+        tabs.addTab(self._tab_wheels(), "Колеса")
         tabs.addTab(self._tab_arduino(), "ARDUINO")
         tabs.addTab(self._tab_ai_status(), "AI STATUS")
         return tabs
@@ -885,7 +902,7 @@ class RoboNeural(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        head = QGroupBox("ПРАВАЯ РУКА · РУЧНОЕ УПРАВЛЕНИЕ")
+        head = QGroupBox("ПИНЫ 0..13 · РУЧНОЕ УПРАВЛЕНИЕ")
         head_layout = QHBoxLayout(head)
         title = QLabel("Диапазон сервоприводов: 0° … 180°")
         title.setStyleSheet(f"color:{C['cyan']};font-weight:bold;font-size:12px;")
@@ -898,6 +915,116 @@ class RoboNeural(QMainWindow):
         btn_status.clicked.connect(lambda: self._ard_send("STATUS"))
         head_layout.addWidget(btn_status)
         layout.addWidget(head)
+
+    def _tab_wheels(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        head = QGroupBox("ПИНЫ 0..12 · МОТОРЫ КОЛЁС")
+        head_layout = QHBoxLayout(head)
+        title = QLabel("Скорость PWM: 0 … 255")
+        title.setStyleSheet(f"color:{C['cyan']};font-weight:bold;font-size:12px;")
+        head_layout.addWidget(title)
+        head_layout.addStretch()
+        btn_all_off = self._btn("ВСЕ ОФФ", C["amber"])
+        btn_all_off.clicked.connect(self._wheels_all_off)
+        head_layout.addWidget(btn_all_off)
+        btn_status = self._btn("ОБНОВИТЬ СТАТУС")
+        btn_status.clicked.connect(lambda: self._ard_send("STATUS"))
+        head_layout.addWidget(btn_status)
+        layout.addWidget(head)
+
+        # Wheels checkboxes grid
+        wheels_box = QGroupBox("ПИНЫ ДЛЯ ВЫБОРА")
+        wheels_grid = QGridLayout(wheels_box)
+        wheels_grid.setSpacing(8)
+        for row, (pid, pin_num) in enumerate(self.WHEEL_PINS):
+            col = row % 6  # 6 columns
+            rrow = row // 6
+
+            chk = QCheckBox(pid)
+            chk.setStyleSheet(f"""
+                QCheckBox {{ color:{C['cyan']}; font-size:11px; letter-spacing:2px; spacing:6px; }}
+                QCheckBox::indicator {{ width:16px; height:16px; border:1px solid {C['border']}; border-radius:3px; background:{C['deep']}; }}
+                QCheckBox::indicator:checked {{ background:{C['green']}; border-color:{C['green']}; }}
+            """)
+            chk.stateChanged.connect(lambda state, p=pid: self._wheel_pin_toggled(p, state > 0))
+            wheels_grid.addWidget(chk, rrow, col)
+            self._wheel_widgets[pid] = chk
+
+        layout.addWidget(wheels_box)
+
+        # Speed control
+        speed_group = QGroupBox("СКОРОСТЬ")
+        speed_layout = QHBoxLayout(speed_group)
+        speed_layout.addWidget(self._label("SPEED", 9, fixed=46))
+        self.wheel_speed_sl = QSlider(Qt.Orientation.Horizontal)
+        self.wheel_speed_sl.setRange(0, 255)
+        self.wheel_speed_sl.setValue(128)
+        self.wheel_speed_sl.setStyleSheet(
+            f"QSlider::groove:horizontal{{height:12px;background:{C['panel']};border:1px solid {C['border']};border-radius:4px;}}"
+            f"QSlider::handle:horizontal{{width:20px;background:{C['amber']};margin:-6px 0;border-radius:4px;}}"
+        )
+        self.wheel_speed_lbl = QLabel("128")
+        self.wheel_speed_lbl.setStyleSheet(f"color:{C['amber']};font-weight:bold;font-size:12px;")
+        self.wheel_speed_lbl.setFixedWidth(40)
+        self.wheel_speed_sl.valueChanged.connect(
+            lambda v: self.wheel_speed_lbl.setText(str(v))
+        )
+        speed_layout.addWidget(self.wheel_speed_sl)
+        speed_layout.addWidget(self.wheel_speed_lbl)
+        layout.addWidget(speed_group)
+
+        # Control buttons
+        btn_group = QGroupBox("УПРАВЛЕНИЕ")
+        btn_layout = QHBoxLayout(btn_group)
+        btn_layout.setSpacing(8)
+
+        self.btn_wheel_fwd = self._btn("ВПЕРЁД", C["green"])
+        self.btn_wheel_fwd.clicked.connect(self._wheels_forward)
+        btn_layout.addWidget(self.btn_wheel_fwd)
+
+        self.btn_wheel_bkwd = self._btn("НАЗАД", C["red"])
+        self.btn_wheel_bkwd.clicked.connect(self._wheels_backward)
+        btn_layout.addWidget(self.btn_wheel_bkwd)
+
+        self.btn_wheel_stop = self._btn("СТОП", C["amber"])
+        self.btn_wheel_stop.clicked.connect(self._wheels_stop)
+        btn_layout.addWidget(self.btn_wheel_stop)
+
+        layout.addWidget(btn_group)
+
+        # Individual pin control
+        indiv_group = QGroupBox("ИНДИВИДУАЛЬНОЕ УПРАВЛЕНИЕ ПИНАМИ")
+        indiv_layout = QGridLayout(indiv_group)
+        indiv_layout.setSpacing(4)
+        for row, (pid, pin_num) in enumerate(self.WHEEL_PINS):
+            col = 0
+            lbl = QLabel(f"{pid} (PIN {pin_num})")
+            lbl.setStyleSheet(f"color:{C['cyan']};font-size:10px;")
+            indiv_layout.addWidget(lbl, row, col)
+
+            fwd_btn = self._btn("FWD", C["green"], small=True)
+            fwd_btn.clicked.connect(lambda _, p=pid: self._wheel_individual_fwd(p))
+            indiv_layout.addWidget(fwd_btn, row, col+1)
+
+            bkwd_btn = self._btn("BKWD", C["red"], small=True)
+            bkwd_btn.clicked.connect(lambda _, p=pid: self._wheel_individual_bkwd(p))
+            indiv_layout.addWidget(bkwd_btn, row, col+2)
+
+            stop_btn = self._btn("STOP", C["amber"], small=True)
+            stop_btn.clicked.connect(lambda _, p=pid: self._wheel_individual_stop(p))
+            indiv_layout.addWidget(stop_btn, row, col+3)
+
+        layout.addWidget(indiv_group)
+
+        info = QLabel("Выберите пины → установите скорость → нажмите ВПЕРЁД/НАЗАД/СТОП\nИли используйте индивидуальное управление каждым пином")
+        info.setStyleSheet(f"color:{C['text2']};font-size:10px;")
+        layout.addWidget(info)
+        layout.addStretch()
+        return widget
 
         hand_box = QGroupBox("СЕРВОПРИВОДЫ")
         hand_grid = QGridLayout(hand_box)
@@ -954,7 +1081,7 @@ class RoboNeural(QMainWindow):
 
         layout.addWidget(hand_box)
 
-        info = QLabel("Профили: S1=THUMB, S2=INDEX, S3=MIDDLE, S4=RING, S5=PINKY")
+        info = QLabel("Профили: P0..P13 соответствуют пинам 0..13")
         info.setStyleSheet(f"color:{C['text2']};font-size:10px;")
         layout.addWidget(info)
         layout.addStretch()
@@ -1167,12 +1294,14 @@ class RoboNeural(QMainWindow):
     # Widget helpers
     # -----------------------------------------------------------------------
 
-    def _btn(self, text, color=None):
+    def _btn(self, text, color=None, small=False):
         button = QPushButton(text)
+        font_size = "8px" if small else "10px"
+        padding = "3px 8px" if small else "5px 12px"
         if color:
             button.setStyleSheet(f"""
                 QPushButton{{background:{color};color:white;border:none;border-radius:2px;
-                padding:5px 12px;font-size:10px;letter-spacing:2px;font-weight:bold;}}
+                padding:{padding};font-size:{font_size};letter-spacing:1px;font-weight:bold;}}
                 QPushButton:hover{{opacity:0.9;}}
                 QPushButton:disabled{{background:{C['border']};color:{C['text3']};}}
             """)
@@ -1579,6 +1708,65 @@ class RoboNeural(QMainWindow):
                 delay_ms, lambda s=servo_id, a=angle: self._set_right_hand_angle(s, a)
             )
         self._log(f"{servo_id}: тест 0°→180°→0°", C["amber"])
+
+    def _wheel_pin_toggled(self, pid, checked):
+        """Track selected wheel pins."""
+        if checked:
+            self._log(f"Колёса: {pid} включён")
+        else:
+            self._log(f"Колёса: {pid} выключен")
+
+    def _get_selected_wheel_pins(self):
+        """Get list of checked pin IDs."""
+        return [pid for pid, chk in self._wheel_widgets.items() if chk.isChecked()]
+
+    def _wheels_forward(self):
+        pins = self._get_selected_wheel_pins()
+        speed = self.wheel_speed_sl.value()
+        if not pins:
+            self._log("Выберите хотя бы один пин колеса!", C["red"])
+            return
+        for pid in pins:
+            self._ard_send(f"MOTOR:{pid}:fwd:{speed}")
+        self._log(f"Колёса ВПЕРЁД: {', '.join(pins)} speed={speed}", C["green"])
+
+    def _wheels_backward(self):
+        pins = self._get_selected_wheel_pins()
+        speed = self.wheel_speed_sl.value()
+        if not pins:
+            self._log("Выберите хотя бы один пин колеса!", C["red"])
+            return
+        for pid in pins:
+            self._ard_send(f"MOTOR:{pid}:bkwd:{speed}")
+        self._log(f"Колёса НАЗАД: {', '.join(pins)} speed={speed}", C["red"])
+
+    def _wheels_stop(self):
+        pins = self._get_selected_wheel_pins()
+        if not pins:
+            self._log("Выберите хотя бы один пин колеса!", C["red"])
+            return
+        for pid in pins:
+            self._ard_send(f"MOTOR:{pid}:stop:0")
+        self._log(f"Колёса СТОП: {', '.join(pins)}", C["amber"])
+
+    def _wheels_all_off(self):
+        for pid in [p[0] for p in self.WHEEL_PINS]:
+            self._ard_send(f"MOTOR:{pid}:stop:0")
+        self._log("Все колёса ОФФ (0-12)", C["amber"])
+
+    def _wheel_individual_fwd(self, pid):
+        speed = self.wheel_speed_sl.value()
+        self._ard_send(f"MOTOR:{pid}:fwd:{speed}")
+        self._log(f"Колесо {pid} ВПЕРЁД speed={speed}", C["green"])
+
+    def _wheel_individual_bkwd(self, pid):
+        speed = self.wheel_speed_sl.value()
+        self._ard_send(f"MOTOR:{pid}:bkwd:{speed}")
+        self._log(f"Колесо {pid} НАЗАД speed={speed}", C["red"])
+
+    def _wheel_individual_stop(self, pid):
+        self._ard_send(f"MOTOR:{pid}:stop:0")
+        self._log(f"Колесо {pid} СТОП", C["amber"])
 
     def _update_photo_target(self):
         target = self._connected_server_ip or self.ip_in.text().strip() or "manual ip"

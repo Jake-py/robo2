@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qt app for right-hand servo testing (5 channels, manual 0..180° control)."""
+"""Qt app for pin servo testing (14 channels, manual 0..180° control)."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import serial.tools.list_ports
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QGroupBox,
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSlider,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -33,11 +35,20 @@ from PyQt6.QtWidgets import (
 
 SERVO_MAX_DEG = 180
 SERVO_ORDER = [
-    ("S1", "THUMB", "9"),
-    ("S2", "INDEX", "10"),
-    ("S3", "MIDDLE", "11"),
-    ("S4", "RING", "12"),
-    ("S5", "PINKY", "A0"),
+    ("P0", "PIN 0", "0"),
+    ("P1", "PIN 1", "1"),
+    ("P2", "PIN 2", "2"),
+    ("P3", "PIN 3", "3"),
+    ("P4", "PIN 4", "4"),
+    ("P5", "PIN 5", "5"),
+    ("P6", "PIN 6", "6"),
+    ("P7", "PIN 7", "7"),
+    ("P8", "PIN 8", "8"),
+    ("P9", "PIN 9", "9"),
+    ("P10", "PIN 10", "10"),
+    ("P11", "PIN 11", "11"),
+    ("P12", "PIN 12", "12"),
+    ("P13", "PIN 13", "13"),
 ]
 
 
@@ -58,7 +69,7 @@ class ServoState:
 class GripperWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Правая рука: ручной контроль сервоприводов")
+        self.setWindowTitle("Тест сервоприводов по пинам 0..13")
         self.setMinimumSize(1100, 680)
 
         self.ser: serial.Serial | None = None
@@ -126,10 +137,23 @@ class GripperWindow(QMainWindow):
         fw_layout.addWidget(self.upload_btn, 3, 2)
         layout.addWidget(fw_box)
 
-        ctrl_box = QGroupBox("Правая рука (ручное управление 0..180°)")
+        tabs = QTabWidget()
+        tabs.addTab(self._build_servo_tab(), "Сервоприводы")
+        tabs.addTab(self._build_wheels_tab(), "Колеса")
+        layout.addWidget(tabs)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        layout.addWidget(self.log_view, 1)
+
+    def _build_servo_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        ctrl_box = QGroupBox("Пины 0..13 (ручное управление 0..180°)")
         ctrl_layout = QVBoxLayout(ctrl_box)
         top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("Пины: S1=9, S2=10, S3=11, S4=12, S5=A0"))
+        top_row.addWidget(QLabel("Пины: 0..13"))
         top_row.addStretch()
         self.all_home_btn = QPushButton("ALL HOME 0°")
         self.all_home_btn.clicked.connect(self.home_all)
@@ -147,9 +171,76 @@ class GripperWindow(QMainWindow):
         ctrl_layout.addLayout(grid)
         layout.addWidget(ctrl_box)
 
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        layout.addWidget(self.log_view, 1)
+        return widget
+
+    def _build_wheels_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Pins selection
+        pins_box = QGroupBox("Выбор пинов 0..12")
+        pins_layout = QGridLayout(pins_box)
+        self.wheel_checkboxes = {}
+        for i, pin in enumerate(range(13)):
+            chk = QCheckBox(f"P{pin}")
+            chk.setStyleSheet("QCheckBox { spacing: 6px; }")
+            pins_layout.addWidget(chk, i // 7, i % 7)
+            self.wheel_checkboxes[f"P{pin}"] = chk
+        layout.addWidget(pins_box)
+
+        # Speed control
+        speed_box = QGroupBox("Скорость PWM (0-255)")
+        speed_layout = QHBoxLayout(speed_box)
+        self.wheel_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.wheel_speed_slider.setRange(0, 255)
+        self.wheel_speed_slider.setValue(128)
+        self.wheel_speed_label = QLabel("128")
+        self.wheel_speed_label.setFixedWidth(40)
+        self.wheel_speed_slider.valueChanged.connect(
+            lambda v: self.wheel_speed_label.setText(str(v))
+        )
+        speed_layout.addWidget(QLabel("Скорость:"))
+        speed_layout.addWidget(self.wheel_speed_slider)
+        speed_layout.addWidget(self.wheel_speed_label)
+        layout.addWidget(speed_box)
+
+        # Group control buttons
+        group_box = QGroupBox("Групповое управление")
+        group_layout = QHBoxLayout(group_box)
+        self.wheel_fwd_btn = QPushButton("ВПЕРЁД")
+        self.wheel_fwd_btn.clicked.connect(self.wheels_forward)
+        self.wheel_bkwd_btn = QPushButton("НАЗАД")
+        self.wheel_bkwd_btn.clicked.connect(self.wheels_backward)
+        self.wheel_stop_btn = QPushButton("СТОП")
+        self.wheel_stop_btn.clicked.connect(self.wheels_stop)
+        self.wheel_all_stop_btn = QPushButton("ВСЕ СТОП")
+        self.wheel_all_stop_btn.clicked.connect(self.wheels_all_stop)
+        group_layout.addWidget(self.wheel_fwd_btn)
+        group_layout.addWidget(self.wheel_bkwd_btn)
+        group_layout.addWidget(self.wheel_stop_btn)
+        group_layout.addWidget(self.wheel_all_stop_btn)
+        layout.addWidget(group_box)
+
+        # Individual control
+        indiv_box = QGroupBox("Индивидуальное управление")
+        indiv_layout = QGridLayout(indiv_box)
+        for i, pin in enumerate(range(13)):
+            lbl = QLabel(f"P{pin}")
+            fwd_btn = QPushButton("FWD")
+            fwd_btn.clicked.connect(lambda _, p=f"P{pin}": self.wheel_individual_fwd(p))
+            bkwd_btn = QPushButton("BKWD")
+            bkwd_btn.clicked.connect(lambda _, p=f"P{pin}": self.wheel_individual_bkwd(p))
+            stop_btn = QPushButton("STOP")
+            stop_btn.clicked.connect(lambda _, p=f"P{pin}": self.wheel_individual_stop(p))
+            row = i // 4
+            col = (i % 4) * 4
+            indiv_layout.addWidget(lbl, row, col)
+            indiv_layout.addWidget(fwd_btn, row, col+1)
+            indiv_layout.addWidget(bkwd_btn, row, col+2)
+            indiv_layout.addWidget(stop_btn, row, col+3)
+        layout.addWidget(indiv_box)
+
+        return widget
 
     def _build_servo_controls(self, grid: QGridLayout, sid: str, row: int):
         st = self.states[sid]
@@ -464,6 +555,57 @@ class GripperWindow(QMainWindow):
     def _finish_test_home(self, sid: str):
         self.set_servo_angle(sid, 0)
         self.states[sid].test_running = False
+
+    def get_selected_wheel_pins(self):
+        return [pid for pid, chk in self.wheel_checkboxes.items() if chk.isChecked()]
+
+    def wheels_forward(self):
+        pins = self.get_selected_wheel_pins()
+        speed = self.wheel_speed_slider.value()
+        if not pins:
+            self.log("Выберите хотя бы один пин колеса!")
+            return
+        for pid in pins:
+            self.send_command(f"MOTOR:{pid}:fwd:{speed}")
+        self.log(f"Колёса ВПЕРЁД: {', '.join(pins)} speed={speed}")
+
+    def wheels_backward(self):
+        pins = self.get_selected_wheel_pins()
+        speed = self.wheel_speed_slider.value()
+        if not pins:
+            self.log("Выберите хотя бы один пин колеса!")
+            return
+        for pid in pins:
+            self.send_command(f"MOTOR:{pid}:bkwd:{speed}")
+        self.log(f"Колёса НАЗАД: {', '.join(pins)} speed={speed}")
+
+    def wheels_stop(self):
+        pins = self.get_selected_wheel_pins()
+        if not pins:
+            self.log("Выберите хотя бы один пин колеса!")
+            return
+        for pid in pins:
+            self.send_command(f"MOTOR:{pid}:stop:0")
+        self.log(f"Колёса СТОП: {', '.join(pins)}")
+
+    def wheels_all_stop(self):
+        for pid in self.wheel_checkboxes:
+            self.send_command(f"MOTOR:{pid}:stop:0")
+        self.log("Все колёса СТОП (0-12)")
+
+    def wheel_individual_fwd(self, pid):
+        speed = self.wheel_speed_slider.value()
+        self.send_command(f"MOTOR:{pid}:fwd:{speed}")
+        self.log(f"{pid} ВПЕРЁД speed={speed}")
+
+    def wheel_individual_bkwd(self, pid):
+        speed = self.wheel_speed_slider.value()
+        self.send_command(f"MOTOR:{pid}:bkwd:{speed}")
+        self.log(f"{pid} НАЗАД speed={speed}")
+
+    def wheel_individual_stop(self, pid):
+        self.send_command(f"MOTOR:{pid}:stop:0")
+        self.log(f"{pid} СТОП")
 
     def closeEvent(self, event):
         self.disconnect_serial()
